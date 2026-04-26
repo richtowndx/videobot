@@ -1,0 +1,27 @@
+# Runtime data
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# Environment
+.env
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
