@@ -1,5 +1,7 @@
 import gc
 import logging
+import resource
+import threading
 from dataclasses import dataclass
 
 from config import DataConfig
@@ -8,6 +10,11 @@ from downloaders import get_downloader
 from summarizer.llm import LLMSummarizer
 
 logger = logging.getLogger(__name__)
+
+
+def _mem_mb():
+    """Get current memory usage in MB."""
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
 
 
 @dataclass
@@ -23,6 +30,9 @@ class Pipeline:
         self.data_config = DataConfig
         self._summarizer = None
         self._transcriber = None
+        self._transcriber_lock = threading.Lock()
+        self._processing = False
+        self._processing_lock = threading.Lock()
 
     @property
     def summarizer(self):
@@ -33,11 +43,38 @@ class Pipeline:
     @property
     def transcriber(self):
         if self._transcriber is None:
-            from transcriber.whisper import WhisperTranscriber
-            self._transcriber = WhisperTranscriber()
+            with self._transcriber_lock:
+                # Double-check after acquiring lock
+                if self._transcriber is None:
+                    from transcriber.whisper import WhisperTranscriber
+                    self._transcriber = WhisperTranscriber()
         return self._transcriber
 
+    def is_busy(self) -> bool:
+        with self._processing_lock:
+            return self._processing
+
+    def set_processing(self, value: bool):
+        with self._processing_lock:
+            self._processing = value
+
     def process(self, url: str, task: Task) -> PipelineResult | None:
+        mem_start = _mem_mb()
+        logger.info(f"[MEM] Pipeline start for {task.task_id} [mem: {mem_start:.0f}MB]")
+
+        # Memory check
+        if mem_start > 1024:
+            logger.warning(f"[MEM] Memory {mem_start:.0f}MB exceeds 1024MB threshold, rejecting task")
+            self.task_manager.update_state(task, TaskState.FAILED, error="Server memory too high, try later")
+            return None
+
+        # Busy check - reject if another task is in progress
+        if self.is_busy():
+            logger.warning(f"Pipeline busy, rejecting task {task.task_id}")
+            self.task_manager.update_state(task, TaskState.FAILED, error="Server busy, try later")
+            return None
+
+        self.set_processing(True)
         try:
             # Step 1: Check if already completed
             cached = self.task_manager.get_cached_result(task.task_id)
@@ -88,16 +125,24 @@ class Pipeline:
                 if not self.task_manager.has_transcript(task):
                     self.task_manager.update_state(task, TaskState.TRANSCRIBING)
                     gc.collect()
+                    mem_before_transcribe = _mem_mb()
+                    logger.info(f"[MEM] Before transcription [mem: {mem_before_transcribe:.0f}MB]")
                     audio_path = str(task.audio_file)
                     audio_text = self.transcriber.transcript(audio_path)
+                    mem_after_transcribe = _mem_mb()
+                    logger.info(f"[MEM] After transcription [mem: {mem_after_transcribe:.0f}MB, delta: {mem_after_transcribe-mem_before_transcribe:.0f}MB]")
                     self.task_manager.save_transcript(task, audio_text)
                     logger.info(f"Transcription done ({len(audio_text)} chars)")
                     gc.collect()
+                    mem_after_gc = _mem_mb()
+                    logger.info(f"[MEM] After GC [mem: {mem_after_gc:.0f}MB]")
                 else:
                     audio_text = self.task_manager.load_transcript(task)
 
             # Step 6: Summarize
             self.task_manager.update_state(task, TaskState.SUMMARIZING)
+            mem_before_summary = _mem_mb()
+            logger.info(f"[MEM] Before summarization [mem: {mem_before_summary:.0f}MB]")
             text_content = subtitle_text or audio_text or ""
             if not text_content:
                 logger.error("No text content available for summarization")
@@ -105,16 +150,26 @@ class Pipeline:
                 return None
 
             markdown = self.summarizer.summarize(task.title, text_content)
+            mem_after_summary = _mem_mb()
+            logger.info(f"[MEM] After summarization [mem: {mem_after_summary:.0f}MB, delta: {mem_after_summary-mem_before_summary:.0f}MB]")
 
             # Step 7: Save and cleanup
             self.task_manager.save_note(task, markdown)
             self.task_manager.update_state(task, TaskState.COMPLETED)
+            mem_before_cleanup = _mem_mb()
+            logger.info(f"[MEM] Before cleanup [mem: {mem_before_cleanup:.0f}MB]")
             self.task_manager.cleanup_task_files(task)
+            mem_after_cleanup = _mem_mb()
+            logger.info(f"[MEM] After cleanup [mem: {mem_after_cleanup:.0f}MB, delta: {mem_after_cleanup-mem_before_cleanup:.0f}MB]")
 
-            logger.info(f"Pipeline completed for {task.task_id}")
+            mem_end = _mem_mb()
+            logger.info(f"[MEM] Pipeline completed for {task.task_id} [mem: {mem_end:.0f}MB, total_delta: {mem_end-mem_start:.0f}MB]")
             return PipelineResult(task_id=task.task_id, title=task.title, markdown=markdown)
 
         except Exception as e:
-            logger.error(f"Pipeline failed for {task.task_id}: {e}", exc_info=True)
+            mem_err = _mem_mb()
+            logger.error(f"Pipeline failed for {task.task_id}: {e} [mem: {mem_err:.0f}MB, delta: {mem_err-mem_start:.0f}MB]", exc_info=True)
             self.task_manager.update_state(task, TaskState.FAILED, error=str(e))
             return None
+        finally:
+            self.set_processing(False)

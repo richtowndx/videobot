@@ -115,7 +115,7 @@ class AIConfig:
 
 
 class WhisperConfig:
-    MODEL_SIZE = os.environ.get("WHISPER_MODEL_SIZE", "base")
+    MODEL_SIZE = os.environ.get("WHISPER_MODEL_SIZE", "tiny")
     DEVICE = "cpu"
     COMPUTE_TYPE = "int8"
 

@@ -97,6 +97,11 @@ async def handle_message(message: types.Message):
         await message.answer("Unauthorized. This bot is for private use only.")
         return
 
+    # Check if pipeline is busy processing another task
+    if pipeline.is_busy():
+        await message.answer("Server is busy processing another request. Please try again later.")
+        return
+
     urls = extract_urls(message.text)
     if not urls:
         await message.answer("Please send a valid Bilibili or YouTube link.")

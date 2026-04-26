@@ -2,6 +2,7 @@ import os
 import gc
 import logging
 import tempfile
+import resource
 from typing import Optional
 
 from faster_whisper import WhisperModel
@@ -10,6 +11,11 @@ from transcriber.base import BaseTranscriber
 from config import WhisperConfig, DataConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _mem_mb():
+    """Get current memory usage in MB."""
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
 
 MODEL_MAP = {
     "tiny": "pengzhendong/faster-whisper-tiny",
@@ -27,6 +33,15 @@ class WhisperTranscriber(BaseTranscriber):
         model_dir = DataConfig.MODELS_DIR
         model_path = model_dir / f"whisper-{model_size}"
 
+        # Validate existing directory matches expected model size
+        if model_path.exists():
+            # Check if it looks like a valid model directory (has bin/model files)
+            # If model_size changed (e.g., base->tiny), old dir may be wrong model
+            import shutil
+            if not self._is_valid_model_dir(model_path, model_size):
+                logger.warning(f"Model directory {model_path} exists but may be wrong model, removing...")
+                shutil.rmtree(model_path)
+
         if not model_path.exists():
             logger.info(f"Downloading whisper-{model_size} model...")
             try:
@@ -40,6 +55,7 @@ class WhisperTranscriber(BaseTranscriber):
                 model_path = model_size
 
         logger.info(f"Loading WhisperModel: {model_path}")
+        mem_before = _mem_mb()
         self.model = WhisperModel(
             model_size_or_path=str(model_path),
             device=WhisperConfig.DEVICE,
@@ -47,14 +63,21 @@ class WhisperTranscriber(BaseTranscriber):
             num_workers=1,
         )
         gc.collect()
-        logger.info("WhisperModel loaded")
+        mem_after = _mem_mb()
+        logger.info(f"WhisperModel loaded [mem: {mem_after:.0f}MB, delta: {mem_after-mem_before:.0f}MB]")
+
+    def _is_valid_model_dir(self, path, expected_size: str) -> bool:
+        """Check if model directory matches expected model size."""
+        # Simple check: directory name should contain expected size
+        return expected_size in path.name
 
     def transcript(self, file_path: str) -> str:
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"Audio file not found: {file_path}")
 
         file_size = os.path.getsize(file_path) / 1024 / 1024
-        logger.info(f"Transcribing: {file_path} ({file_size:.1f}MB)")
+        mem_start = _mem_mb()
+        logger.info(f"Transcribing: {file_path} ({file_size:.1f}MB) [mem: {mem_start:.0f}MB]")
 
         duration = self._get_duration(file_path)
 
@@ -104,7 +127,8 @@ class WhisperTranscriber(BaseTranscriber):
                     continue
 
                 # Transcribe immediately, then release memory
-                logger.info(f"Transcribing segment {i+1}/{num_segments}")
+                seg_mem_start = _mem_mb()
+                logger.info(f"Transcribing segment {i+1}/{num_segments} [mem: {seg_mem_start:.0f}MB]")
                 gc.collect()
                 try:
                     segments, info = self.model.transcribe(seg_path)
@@ -118,6 +142,8 @@ class WhisperTranscriber(BaseTranscriber):
                     except OSError:
                         pass
                 gc.collect()
+                seg_mem_end = _mem_mb()
+                logger.info(f"Segment {i+1}/{num_segments} done [mem: {seg_mem_end:.0f}MB, delta: {seg_mem_end-seg_mem_start:.0f}MB]")
 
             return " ".join(all_texts)
 
