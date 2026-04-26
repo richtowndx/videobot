@@ -13,8 +13,14 @@ logger = logging.getLogger(__name__)
 
 
 def _mem_mb():
-    """Get current memory usage in MB."""
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    """Get current RSS memory in MB (not peak)."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024
+    except Exception:
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
 
 
 @dataclass
@@ -153,11 +159,19 @@ class Pipeline:
             mem_before_cleanup = _mem_mb()
             logger.info(f"[MEM] Before cleanup [mem: {mem_before_cleanup:.0f}MB]")
             self.task_manager.cleanup_task_files(task)
+
+            # Unload Whisper model to free memory between tasks
+            if self._transcriber is not None:
+                del self._transcriber
+                self._transcriber = None
+                logger.info("Whisper model unloaded")
+            gc.collect()
+
             mem_after_cleanup = _mem_mb()
-            logger.info(f"[MEM] After cleanup [mem: {mem_after_cleanup:.0f}MB, delta: {mem_after_cleanup-mem_before_cleanup:.0f}MB]")
+            logger.info(f"[MEM] After cleanup [mem: {mem_after_cleanup:.0f}MB, released: {mem_before_cleanup-mem_after_cleanup:.0f}MB]")
 
             mem_end = _mem_mb()
-            logger.info(f"[MEM] Pipeline completed for {task.task_id} [mem: {mem_end:.0f}MB, total_delta: {mem_end-mem_start:.0f}MB]")
+            logger.info(f"[MEM] Pipeline completed for {task.task_id} [mem: {mem_end:.0f}MB, delta: {mem_end-mem_start:.0f}MB]")
             return PipelineResult(task_id=task.task_id, title=task.title, markdown=markdown)
 
         except Exception as e:

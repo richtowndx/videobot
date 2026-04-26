@@ -14,8 +14,14 @@ logger = logging.getLogger(__name__)
 
 
 def _mem_mb():
-    """Get current memory usage in MB."""
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    """Get current RSS memory in MB (not peak)."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024
+    except Exception:
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
 
 MODEL_MAP = {
     "tiny": "pengzhendong/faster-whisper-tiny",
