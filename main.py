@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 def _build_session():
     if BotConfig.PROXY:
-        logger.info(f"Bot using proxy: {BotConfig.PROXY}")
+        logger.info("Bot using proxy")
         return AiohttpSession(proxy=BotConfig.PROXY)
     return AiohttpSession()
 
