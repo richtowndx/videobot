@@ -68,12 +68,6 @@ class Pipeline:
             self.task_manager.update_state(task, TaskState.FAILED, error="Server memory too high, try later")
             return None
 
-        # Busy check - reject if another task is in progress
-        if self.is_busy():
-            logger.warning(f"Pipeline busy, rejecting task {task.task_id}")
-            self.task_manager.update_state(task, TaskState.FAILED, error="Server busy, try later")
-            return None
-
         self.set_processing(True)
         try:
             # Step 1: Check if already completed

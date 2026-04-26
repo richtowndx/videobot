@@ -39,7 +39,7 @@ REFINE_SYSTEM_PROMPT = """你是一个专业的笔记助手，正在分阶段处
 - **不要**将输出包裹在代码块中。
 
 规则：
-1. 保留已有笔记中的所有重要信息，不要丢弃。
+1. 保留已有笔记中的所有重要信息，不要丢弃。最好原始保留已有内容，除非新片段提供了更准确或更详细的信息。
 2. 将新片段中的重要信息整合进笔记的对应位置。
 3. 如果新片段与已有内容重复，合并而非简单堆叠。
 4. 去除广告、填充词、问候语等无关内容。
@@ -47,12 +47,14 @@ REFINE_SYSTEM_PROMPT = """你是一个专业的笔记助手，正在分阶段处
 6. 在笔记末尾保留/更新一段专业的 **AI 总结**。
 """
 
-# 保守估算：1 中文字符 ≈ 1 token，128K 上下文预留 28K 给 system prompt + 输出
-CHUNK_SIZE = 100_000
+# Token 预算：qwen-plus <120K token 免费额度
+# 中文约 1.5-2 char/token，取保守 1.5，留 20K 给 system prompt + 输出
+# 100K token ÷ 1.5 char/token ≈ 66K 字符
+CHUNK_CHAR_LIMIT = 90_000
 CHUNK_OVERLAP = 500
 
 
-def _split_chunks(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
+def _split_chunks(text: str, chunk_size: int = CHUNK_CHAR_LIMIT, overlap: int = CHUNK_OVERLAP) -> list[str]:
     """Split text into chunks at paragraph boundaries with overlap."""
     if len(text) <= chunk_size:
         return [text]
@@ -88,13 +90,13 @@ class LLMSummarizer:
     def summarize(self, title: str, transcript: str) -> str:
         text_len = len(transcript)
 
-        if text_len <= CHUNK_SIZE:
+        if text_len <= CHUNK_CHAR_LIMIT:
             return self._summarize_single(title, transcript)
 
         chunks = _split_chunks(transcript)
         logger.info(
             f"Long transcript ({text_len} chars), using refine strategy: "
-            f"{len(chunks)} chunks of ~{CHUNK_SIZE} chars"
+            f"{len(chunks)} chunks of ~{CHUNK_CHAR_LIMIT} chars"
         )
         return self._summarize_refine(title, chunks)
 

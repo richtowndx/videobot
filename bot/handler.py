@@ -19,6 +19,54 @@ pipeline = Pipeline()
 
 MAX_RETRIES = 3
 
+# Task queue: serializes pipeline processing so requests don't get rejected
+_queue: asyncio.Queue | None = None
+_worker_started = False
+
+
+async def _ensure_worker():
+    """Start the queue worker if not already running."""
+    global _queue, _worker_started
+    if _worker_started:
+        return
+    _worker_started = True
+    _queue = asyncio.Queue()
+    asyncio.create_task(_queue_worker())
+
+
+async def _queue_worker():
+    """Process queued requests sequentially."""
+    while True:
+        message, urls, status_msg = await _queue.get()
+        try:
+            total = len(urls)
+            errors = []
+
+            for i, url in enumerate(urls, start=1):
+                success, error = await _process_single_url(message, status_msg, url, i, total)
+                if not success:
+                    errors.append(error)
+
+            if not errors:
+                await status_msg.edit_text(
+                    f"Done! Processed {total} link(s) successfully." if total > 1 else "Done!"
+                )
+            elif len(errors) == total:
+                await status_msg.edit_text("All links failed:\n" + "\n".join(errors))
+            else:
+                succeeded = total - len(errors)
+                await status_msg.edit_text(
+                    f"Processed {succeeded}/{total}. Failures:\n" + "\n".join(errors)
+                )
+        except Exception as e:
+            logger.error(f"Queue worker error: {e}", exc_info=True)
+            try:
+                await status_msg.edit_text(f"Error: {e}")
+            except Exception:
+                pass
+        finally:
+            _queue.task_done()
+
 
 def _is_authorized(message: types.Message) -> bool:
     return message.from_user.id == BotConfig.AUTH_USER_ID
@@ -38,7 +86,8 @@ async def cmd_status(message: types.Message):
         return
     tasks_dir = os.listdir(pipeline.data_config.TASKS_DIR) if pipeline.data_config.TASKS_DIR.exists() else []
     notes_count = len(list(pipeline.data_config.NOTES_DIR.glob("*.md"))) if pipeline.data_config.NOTES_DIR.exists() else 0
-    await message.answer(f"Active tasks: {len(tasks_dir)}\nCompleted notes: {notes_count}")
+    q_size = _queue.qsize() if _queue else 0
+    await message.answer(f"Queue: {q_size} pending\nActive tasks: {len(tasks_dir)}\nCompleted notes: {notes_count}")
 
 
 async def _process_single_url(
@@ -97,39 +146,24 @@ async def handle_message(message: types.Message):
         await message.answer("Unauthorized. This bot is for private use only.")
         return
 
-    # Check if pipeline is busy processing another task
-    if pipeline.is_busy():
-        await message.answer("Server is busy processing another request. Please try again later.")
-        return
+    await _ensure_worker()
 
     urls = extract_urls(message.text)
     if not urls:
         await message.answer("Please send a valid Bilibili or YouTube link.")
         return
 
-    total = len(urls)
-    status_msg = await message.answer(
-        f"Found {total} link(s). Processing..." if total > 1 else "Processing your video..."
-    )
-
-    errors = []
-
-    for i, url in enumerate(urls, start=1):
-        success, error = await _process_single_url(message, status_msg, url, i, total)
-        if not success:
-            errors.append(error)
-
-    if not errors:
-        await status_msg.edit_text(
-            f"Done! Processed {total} link(s) successfully." if total > 1 else "Done!"
+    q_size = _queue.qsize()
+    if q_size > 0:
+        status_msg = await message.answer(
+            f"Queued ({q_size} ahead). Will process {len(urls)} link(s) when ready..."
         )
-    elif len(errors) == total:
-        await status_msg.edit_text("All links failed:\n" + "\n".join(errors))
     else:
-        succeeded = total - len(errors)
-        await status_msg.edit_text(
-            f"Processed {succeeded}/{total}. Failures:\n" + "\n".join(errors)
+        status_msg = await message.answer(
+            f"Processing {len(urls)} link(s)..." if len(urls) > 1 else "Processing your video..."
         )
+
+    await _queue.put((message, urls, status_msg))
 
 
 async def _send_note(message: types.Message, title: str, platform: str, url: str, markdown: str):
