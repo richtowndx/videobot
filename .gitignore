@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# 虚拟环境
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 运行时数据
+data/
+
+# 模型文件（体积大，单独下载）
+models/
+
+# 敏感信息
+.env
+cookie_*.txt
+
+# 测试/覆盖率
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# 下载的媒体文件
+*.mp4
+*.mp3
+*.wav
+*.flac
+*.webm
+*.avi
+*.mkv
+
+# 操作系统
+.DS_Store
+Thumbs.db
