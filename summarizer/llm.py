@@ -1,5 +1,4 @@
 import logging
-from typing import Optional
 
 from openai import OpenAI
 
@@ -27,6 +26,56 @@ SYSTEM_PROMPT = """你是一个专业的笔记助手，擅长将视频转录内�
 6. 在笔记末尾添加一段专业的 **AI 总结**，简要概括整个视频的核心内容。
 """
 
+REFINE_SYSTEM_PROMPT = """你是一个专业的笔记助手，正在分阶段处理一段长视频转录内容。
+
+你已有前一部分内容的笔记摘要，现在需要结合新提供的转录片段，更新和完善笔记。
+
+语言要求：
+- 笔记必须使用 **中文** 撰写。
+- 专有名词、技术术语、品牌名称和人名应适当保留 **英文**。
+
+输出说明：
+- 仅返回最终的 **Markdown 内容**。
+- **不要**将输出包裹在代码块中。
+
+规则：
+1. 保留已有笔记中的所有重要信息，不要丢弃。
+2. 将新片段中的重要信息整合进笔记的对应位置。
+3. 如果新片段与已有内容重复，合并而非简单堆叠。
+4. 去除广告、填充词、问候语等无关内容。
+5. 视频中提及的数学公式必须保留，并以 LaTeX 语法形式呈现。
+6. 在笔记末尾保留/更新一段专业的 **AI 总结**。
+"""
+
+# 保守估算：1 中文字符 ≈ 1 token，128K 上下文预留 28K 给 system prompt + 输出
+CHUNK_SIZE = 100_000
+CHUNK_OVERLAP = 500
+
+
+def _split_chunks(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
+    """Split text into chunks at paragraph boundaries with overlap."""
+    if len(text) <= chunk_size:
+        return [text]
+
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        if end >= len(text):
+            chunks.append(text[start:])
+            break
+
+        # Try to split at paragraph boundary within last 10% of chunk
+        search_start = max(start + int(chunk_size * 0.9), start)
+        split_pos = text.rfind("\n", search_start, end + 1)
+        if split_pos == -1 or split_pos <= start:
+            split_pos = end
+
+        chunks.append(text[start:split_pos])
+        start = split_pos - overlap if split_pos - overlap > start else split_pos
+
+    return chunks
+
 
 class LLMSummarizer:
     def __init__(self):
@@ -37,9 +86,22 @@ class LLMSummarizer:
         self.model = AIConfig.MODEL_NAME
 
     def summarize(self, title: str, transcript: str) -> str:
+        text_len = len(transcript)
+
+        if text_len <= CHUNK_SIZE:
+            return self._summarize_single(title, transcript)
+
+        chunks = _split_chunks(transcript)
+        logger.info(
+            f"Long transcript ({text_len} chars), using refine strategy: "
+            f"{len(chunks)} chunks of ~{CHUNK_SIZE} chars"
+        )
+        return self._summarize_refine(title, chunks)
+
+    def _summarize_single(self, title: str, transcript: str) -> str:
         user_content = f"视频标题：{title}\n\n转录内容：\n{transcript}"
 
-        logger.info(f"Calling LLM for summary (model={self.model}, text_len={len(transcript)})")
+        logger.info(f"Calling LLM (model={self.model}, text_len={len(transcript)})")
 
         response = self.client.chat.completions.create(
             model=self.model,
@@ -54,3 +116,35 @@ class LLMSummarizer:
         result = response.choices[0].message.content
         logger.info(f"LLM summary generated ({len(result)} chars)")
         return result
+
+    def _summarize_refine(self, title: str, chunks: list[str]) -> str:
+        """Iteratively refine summary by processing chunks sequentially."""
+        # First chunk: generate initial summary
+        running_summary = self._summarize_single(title, chunks[0])
+
+        # Subsequent chunks: refine existing summary with new content
+        for i in range(1, len(chunks)):
+            logger.info(f"Refining with chunk {i + 1}/{len(chunks)}")
+
+            user_content = (
+                f"视频标题：{title}\n\n"
+                f"以下是已有的笔记摘要：\n\n{running_summary}\n\n"
+                f"---\n\n"
+                f"以下是新的转录片段：\n\n{chunks[i]}"
+            )
+
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": REFINE_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_content},
+                ],
+                max_tokens=4000,
+                temperature=0.7,
+            )
+
+            running_summary = response.choices[0].message.content
+            logger.info(f"Refined with chunk {i + 1}, summary now {len(running_summary)} chars")
+
+        logger.info(f"Final summary generated ({len(running_summary)} chars)")
+        return running_summary
