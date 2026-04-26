@@ -56,16 +56,16 @@ class WhisperTranscriber(BaseTranscriber):
         file_size = os.path.getsize(file_path) / 1024 / 1024
         logger.info(f"Transcribing: {file_path} ({file_size:.1f}MB)")
 
-        # Preprocess audio
-        processed = self._preprocess_audio(file_path)
+        duration = self._get_duration(file_path)
 
+        # Long audio: segment directly from source, no full preprocess needed
+        if duration > MAX_SEGMENT_DURATION:
+            return self._transcribe_segments(file_path, duration)
+
+        # Short audio: preprocess if large, then transcribe in one pass
+        processed = self._preprocess_audio(file_path)
         try:
-            duration = self._get_duration(processed)
-            if duration > MAX_SEGMENT_DURATION:
-                text = self._transcribe_segments(processed, duration)
-            else:
-                text = self._transcribe_direct(processed)
-            return text
+            return self._transcribe_direct(processed)
         finally:
             if processed != file_path and os.path.exists(processed):
                 os.remove(processed)
@@ -79,15 +79,16 @@ class WhisperTranscriber(BaseTranscriber):
     def _transcribe_segments(self, file_path: str, total_duration: float) -> str:
         import ffmpeg
 
-        segment_files = []
+        num_segments = int(total_duration / MAX_SEGMENT_DURATION) + 1
         temp_dir = tempfile.mkdtemp(prefix="whisper_seg_")
+        all_texts = []
 
         try:
-            # Split audio into chunks
-            num_segments = int(total_duration / MAX_SEGMENT_DURATION) + 1
             for i in range(num_segments):
-                start = i * MAX_SEGMENT_DURATION
                 seg_path = os.path.join(temp_dir, f"seg_{i:04d}.wav")
+
+                # Split one segment
+                start = i * MAX_SEGMENT_DURATION
                 try:
                     (
                         ffmpeg.input(file_path, ss=start, t=MAX_SEGMENT_DURATION)
@@ -95,27 +96,28 @@ class WhisperTranscriber(BaseTranscriber):
                         .overwrite_output()
                         .run(capture_stdout=True, capture_stderr=True)
                     )
-                    if os.path.exists(seg_path) and os.path.getsize(seg_path) > 0:
-                        segment_files.append(seg_path)
+                    if not os.path.exists(seg_path) or os.path.getsize(seg_path) == 0:
+                        logger.warning(f"Segment {i+1}/{num_segments} is empty, skipping")
+                        continue
                 except Exception as e:
-                    logger.warning(f"Segment {i} split failed: {e}")
+                    logger.warning(f"Segment {i+1}/{num_segments} split failed: {e}")
+                    continue
 
-            # Transcribe each segment
-            all_texts = []
-            for i, seg_path in enumerate(segment_files):
-                logger.info(f"Transcribing segment {i+1}/{len(segment_files)}")
+                # Transcribe immediately, then release memory
+                logger.info(f"Transcribing segment {i+1}/{num_segments}")
                 gc.collect()
                 try:
                     segments, info = self.model.transcribe(seg_path)
                     texts = [seg.text.strip() for seg in segments if seg.text.strip()]
                     all_texts.extend(texts)
                 except Exception as e:
-                    logger.error(f"Segment {i+1} transcription failed: {e}")
+                    logger.error(f"Segment {i+1}/{num_segments} transcription failed: {e}")
                 finally:
                     try:
                         os.remove(seg_path)
                     except OSError:
                         pass
+                gc.collect()
 
             return " ".join(all_texts)
 
