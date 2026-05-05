@@ -172,7 +172,7 @@ async def _send_note(message: types.Message, title: str, platform: str, url: str
 
     try:
         doc = types.FSInputFile(file_path, filename=f"{title[:50]}_summary.md")
-        await message.answer_document(doc, caption=f"Summary: {title}")
+        await message.answer_document(doc, caption=f"Summary: {title}", parse_mode=None)
     finally:
         try:
             os.remove(file_path)
