@@ -1,15 +1,17 @@
 import os
 import sys
+import tomllib
 import platform
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.request import urlretrieve
 
-from dotenv import load_dotenv
-
-load_dotenv()
-
 BASE_DIR = Path(__file__).parent
+
+_cfg_path = BASE_DIR / "config.toml"
+with open(_cfg_path, "rb") as _f:
+    _cfg = tomllib.load(_f)
 logger = logging.getLogger(__name__)
 
 
@@ -97,31 +99,68 @@ def _add_to_path(directory: Path):
 
 
 class BotConfig:
-    TOKEN = os.environ.get("BOT_TOKEN", "")
-    AUTH_USER_ID = int(os.environ.get("AUTH_USER_ID", "0"))
-    PROXY = os.environ.get("BOT_PROXY", "") or None
+    _bot = _cfg.get("bot", {})
+    TOKEN = _bot.get("token", "")
+    AUTH_USER_ID = int(_bot.get("auth_user_id", 0))
+    PROXY = _bot.get("proxy", "") or None
 
 
 class DownloaderConfig:
-    BILIBILI_COOKIE = os.environ.get("BILIBILI_COOKIE", "") or None
-    YOUTUBE_COOKIE = os.environ.get("YOUTUBE_COOKIE", "") or None
-    YT_PROXY = os.environ.get("YT_PROXY", "") or None
+    _dl = _cfg.get("downloader", {})
+    BILIBILI_COOKIE = _dl.get("bilibili_cookie", "") or None
+    YOUTUBE_COOKIE = _dl.get("youtube_cookie", "") or None
+    YT_PROXY = _dl.get("yt_proxy", "") or None
+
+
+@dataclass
+class ModelConfig:
+    name: str
+    url: str
+    key: str
+    max_context_tokens: int = 64000
 
 
 class AIConfig:
-    API_KEY = os.environ.get("AI_API_KEY", "")
-    MODEL_NAME = os.environ.get("AI_MODEL_NAME", "qwen-plus")
-    API_URL = os.environ.get("AI_API_URL", "")
+    _ai = _cfg.get("ai", {})
+    MAX_CONTEXT_TOKENS = int(_ai.get("max_context_tokens", 64000))
+
+    @staticmethod
+    def load_models() -> list[ModelConfig]:
+        """Load model list from config.toml [ai] section."""
+        ai = _cfg.get("ai", {})
+        models_cfg = ai.get("models", [])
+        if models_cfg:
+            models = []
+            for item in models_cfg:
+                models.append(ModelConfig(
+                    name=item["name"],
+                    url=item["url"],
+                    key=item["key"],
+                    max_context_tokens=item.get("max_context_tokens", AIConfig.MAX_CONTEXT_TOKENS),
+                ))
+            logger.info(f"Loaded {len(models)} AI model(s): {', '.join(m.name for m in models)}")
+            return models
+
+        # Fallback to single-model config
+        name = ai.get("model_name", "qwen-plus")
+        url = ai.get("api_url", "")
+        key = ai.get("api_key", "")
+        if name and url and key:
+            logger.info(f"Using single AI model: {name}")
+            return [ModelConfig(name=name, url=url, key=key, max_context_tokens=AIConfig.MAX_CONTEXT_TOKENS)]
+
+        raise ValueError("No AI models configured. Set [ai.models] or ai.model_name/api_url/api_key in config.toml.")
 
 
 class WhisperConfig:
-    MODEL_SIZE = os.environ.get("WHISPER_MODEL_SIZE", "tiny")
+    _whisper = _cfg.get("whisper", {})
+    MODEL_SIZE = _whisper.get("model_size", "tiny")
     DEVICE = "cpu"
     COMPUTE_TYPE = "int8"
 
 
 class DataConfig:
-    DATA_DIR = Path(os.environ.get("DATA_DIR", "./data"))
+    DATA_DIR = Path(_cfg.get("data", {}).get("dir", "./data"))
     TASKS_DIR = DATA_DIR / "tasks"
     NOTES_DIR = DATA_DIR / "notes"
     MODELS_DIR = BASE_DIR / "models"

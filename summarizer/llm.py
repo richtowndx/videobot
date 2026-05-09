@@ -1,10 +1,11 @@
 import logging
+from dataclasses import dataclass
 
+import httpx
 from openai import OpenAI
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-from openai import APITimeoutError, APIConnectionError, RateLimitError
+from openai import APITimeoutError, APIConnectionError, RateLimitError, APIStatusError
 
-from config import AIConfig
+from config import AIConfig, ModelConfig
 
 logger = logging.getLogger(__name__)
 
@@ -53,15 +54,25 @@ REFINE_SYSTEM_PROMPT = """你是一个专业的笔记助手，正在分阶段处
 8. 在笔记末尾保留/更新一段专业的 **AI 总结**。
 """
 
-# Token 预算：qwen-plus <120K token 免费额度
-# 中文约 1.5-2 char/token，取保守 1.5，留 20K 给 system prompt + 输出
-# 100K token ÷ 1.5 char/token ≈ 66K 字符
-CHUNK_CHAR_LIMIT = 90_000
+# 中文约 1.5-2 char/token，取保守 1.5
+CHARS_PER_TOKEN = 1.5
+# 为 system prompt + 输出预留的 token 数
+RESERVED_TOKENS = 8000
+# refine 阶段额外需要携带已有摘要，多预留一些
+REFINE_EXTRA_RESERVED = 4000
+
+
+def _calc_chunk_char_limit(max_context_tokens: int) -> int:
+    available = max_context_tokens - RESERVED_TOKENS
+    return int(available / CHARS_PER_TOKEN)
+
+
 CHUNK_OVERLAP = 500
 
 
-def _split_chunks(text: str, chunk_size: int = CHUNK_CHAR_LIMIT, overlap: int = CHUNK_OVERLAP) -> list[str]:
-    """Split text into chunks at paragraph boundaries with overlap."""
+def _split_chunks(text: str, chunk_size: int = 0, overlap: int = CHUNK_OVERLAP) -> list[str]:
+    if chunk_size <= 0:
+        chunk_size = _calc_chunk_char_limit(AIConfig.MAX_CONTEXT_TOKENS)
     if len(text) <= chunk_size:
         return [text]
 
@@ -73,7 +84,6 @@ def _split_chunks(text: str, chunk_size: int = CHUNK_CHAR_LIMIT, overlap: int = 
             chunks.append(text[start:])
             break
 
-        # Try to split at paragraph boundary within last 10% of chunk
         search_start = max(start + int(chunk_size * 0.9), start)
         split_pos = text.rfind("\n", search_start, end + 1)
         if split_pos == -1 or split_pos <= start:
@@ -85,95 +95,124 @@ def _split_chunks(text: str, chunk_size: int = CHUNK_CHAR_LIMIT, overlap: int = 
     return chunks
 
 
+@dataclass
+class _ModelClient:
+    config: ModelConfig
+    client: OpenAI
+
+
 class LLMSummarizer:
+    CONNECT_TIMEOUT = 10.0
+    READ_TIMEOUT = 180.0
+
     def __init__(self):
-        self.client = OpenAI(
-            api_key=AIConfig.API_KEY,
-            base_url=AIConfig.API_URL,
-            timeout=120.0,
-        )
-        self.model = AIConfig.MODEL_NAME
+        self._models: list[_ModelClient] = []
+        for mc in AIConfig.load_models():
+            client = OpenAI(
+                api_key=mc.key,
+                base_url=mc.url,
+                timeout=httpx.Timeout(self.CONNECT_TIMEOUT, read=self.READ_TIMEOUT),
+                max_retries=0,
+            )
+            self._models.append(_ModelClient(config=mc, client=client))
+
+        # Chunk limits based on first model's context (all models should handle similar sizes)
+        first_ctx = self._models[0].config.max_context_tokens
+        self.chunk_char_limit = _calc_chunk_char_limit(first_ctx)
+        self.refine_chunk_char_limit = self.chunk_char_limit - int(REFINE_EXTRA_RESERVED / CHARS_PER_TOKEN)
+        logger.info(f"Chunk size: {self.chunk_char_limit} chars, refine chunk: {self.refine_chunk_char_limit} chars")
+
+        self._check_connectivity()
+
+    def _check_connectivity(self):
+        for mc in self._models:
+            try:
+                mc.client.models.list()
+                logger.info(f"API OK: {mc.config.name} @ {mc.config.url}")
+            except Exception as e:
+                logger.warning(f"API unreachable: {mc.config.name} @ {mc.config.url} — {e}")
+
+    def _call_with_fallback(self, fn, label: str = "LLM call"):
+        """Try fn(client, model_name) on each model in order, return first success."""
+        last_err = None
+        for mc in self._models:
+            try:
+                logger.info(f"Calling {label} (model={mc.config.name})")
+                return fn(mc.client, mc.config.name)
+            except (APITimeoutError, APIConnectionError, RateLimitError, httpx.TimeoutException) as e:
+                last_err = e
+                logger.warning(f"{label} failed on {mc.config.name}: {type(e).__name__}: {e}")
+            except APIStatusError as e:
+                last_err = e
+                logger.warning(f"{label} failed on {mc.config.name}: HTTP {e.status_code} — {e.message}")
+
+        raise RuntimeError(f"All {len(self._models)} model(s) failed for {label}") from last_err
 
     def summarize(self, title: str, transcript: str) -> str:
         text_len = len(transcript)
 
-        if text_len <= CHUNK_CHAR_LIMIT:
+        if text_len <= self.chunk_char_limit:
             return self._summarize_single(title, transcript)
 
-        chunks = _split_chunks(transcript)
+        chunks = _split_chunks(transcript, chunk_size=self.chunk_char_limit)
         logger.info(
             f"Long transcript ({text_len} chars), using refine strategy: "
-            f"{len(chunks)} chunks of ~{CHUNK_CHAR_LIMIT} chars"
+            f"{len(chunks)} chunks of ~{self.chunk_char_limit} chars"
         )
         return self._summarize_refine(title, chunks)
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(min=4, max=60),
-        retry=retry_if_exception_type((APITimeoutError, APIConnectionError, RateLimitError)),
-        before_sleep=lambda rs: logger.warning(
-            f"LLM call failed ({rs.outcome.exception()}), retrying in {rs.next_action.sleep:.1f}s "
-            f"(attempt {rs.attempt_number}/3)"
-        ),
-    )
     def _summarize_single(self, title: str, transcript: str) -> str:
-        user_content = f"视频标题：{title}\n\n转录内容：\n{transcript}"
+        def _fn(client, model):
+            user_content = f"视频标题：{title}\n\n转录内容：\n{transcript}"
+            logger.info(f"Calling LLM (model={model}, text_len={len(transcript)})")
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_content},
+                ],
+                max_tokens=4000,
+                temperature=0.7,
+            )
+            result = response.choices[0].message.content
+            logger.info(f"LLM summary generated ({len(result)} chars)")
+            return result
 
-        logger.info(f"Calling LLM (model={self.model}, text_len={len(transcript)})")
+        return self._call_with_fallback(_fn, "summarize")
 
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_content},
-            ],
-            max_tokens=4000,
-            temperature=0.7,
-        )
-
-        result = response.choices[0].message.content
-        logger.info(f"LLM summary generated ({len(result)} chars)")
-        return result
-
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(min=4, max=60),
-        retry=retry_if_exception_type((APITimeoutError, APIConnectionError, RateLimitError)),
-        before_sleep=lambda rs: logger.warning(
-            f"LLM call failed ({rs.outcome.exception()}), retrying in {rs.next_action.sleep:.1f}s "
-            f"(attempt {rs.attempt_number}/3)"
-        ),
-    )
     def _call_llm(self, system_prompt: str, user_content: str):
-        return self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ],
-            max_tokens=4000,
-            temperature=0.7,
-        )
+        def _fn(client, model):
+            return client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                max_tokens=4000,
+                temperature=0.7,
+            )
+
+        return self._call_with_fallback(_fn, "refine")
 
     def _summarize_refine(self, title: str, chunks: list[str]) -> str:
-        """Iteratively refine summary by processing chunks sequentially."""
-        # First chunk: generate initial summary
         running_summary = self._summarize_single(title, chunks[0])
 
-        # Subsequent chunks: refine existing summary with new content
-        for i in range(1, len(chunks)):
-            logger.info(f"Refining with chunk {i + 1}/{len(chunks)}")
+        remaining_text = "\n".join(chunks[1:])
+        refine_chunks = _split_chunks(remaining_text, chunk_size=self.refine_chunk_char_limit)
+
+        for i, chunk in enumerate(refine_chunks, start=1):
+            logger.info(f"Refining with chunk {i}/{len(refine_chunks)}")
 
             user_content = (
                 f"视频标题：{title}\n\n"
                 f"以下是已有的笔记摘要：\n\n{running_summary}\n\n"
                 f"---\n\n"
-                f"以下是新的转录片段：\n\n{chunks[i]}"
+                f"以下是新的转录片段：\n\n{chunk}"
             )
 
             response = self._call_llm(REFINE_SYSTEM_PROMPT, user_content)
             running_summary = response.choices[0].message.content
-            logger.info(f"Refined with chunk {i + 1}, summary now {len(running_summary)} chars")
+            logger.info(f"Refined with chunk {i}/{len(refine_chunks)}, summary now {len(running_summary)} chars")
 
         logger.info(f"Final summary generated ({len(running_summary)} chars)")
         return running_summary

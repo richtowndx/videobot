@@ -11,11 +11,13 @@ from core.url_parser import extract_urls, parse_platform
 from core.task_manager import TaskManager, TaskState
 from core.pipeline import Pipeline
 from bot.formatter import build_markdown, save_temp_markdown
+from uploaders import UploaderManager
 
 logger = logging.getLogger(__name__)
 router = Router()
 task_manager = TaskManager()
 pipeline = Pipeline()
+uploader_manager = UploaderManager()
 
 MAX_RETRIES = 3
 
@@ -171,8 +173,34 @@ async def _send_note(message: types.Message, title: str, platform: str, url: str
     file_path = save_temp_markdown(title, content)
 
     try:
-        doc = types.FSInputFile(file_path, filename=f"{title[:50]}_summary.md")
-        await message.answer_document(doc, caption=f"Summary: {title}", parse_mode=None)
+        # Wire telegram uploader to send document via this message
+        tg = uploader_manager.get_telegram_uploader()
+        if tg:
+            async def _send(title_, fp):
+                doc = types.FSInputFile(fp, filename=f"{title_[:50]}_summary.md")
+                await message.answer_document(doc, caption=f"Summary: {title_}", parse_mode=None)
+            tg.set_sender(_send)
+
+        # Run all uploaders in configured order
+        results = await uploader_manager.upload(file_path, title)
+
+        # Build status report
+        success_names = [r.uploader for r in results if r.success]
+        failed_items = [f"  - {r.uploader}: {r.message}" for r in results if not r.success and r.message != "not enabled"]
+        skipped_names = [r.uploader for r in results if not r.success and r.message == "not enabled"]
+
+        parts = []
+        if success_names:
+            parts.append(f"Uploaded via: {', '.join(success_names)}")
+        if skipped_names:
+            parts.append(f"Skipped (disabled): {', '.join(skipped_names)}")
+        if failed_items:
+            parts.append("Failed:\n" + "\n".join(failed_items))
+
+        if failed_items:
+            await message.answer("\n".join(parts))
+        elif skipped_names and not success_names:
+            await message.answer("No uploaders available. " + "\n".join(parts))
     finally:
         try:
             os.remove(file_path)

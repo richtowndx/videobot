@@ -1,0 +1,46 @@
+[bot]
+token = "YOUR_TELEGRAM_BOT_TOKEN"
+auth_user_id = 123456789
+# 访问 Telegram API 的代理，留空则不使用
+proxy = "socks5://127.0.0.1:1080"
+
+[downloader]
+# YouTube 下载代理（访问 YouTube），留空则不使用代理
+yt_proxy = "http://127.0.0.1:7897"
+# Bilibili Cookie（留空则使用 cookie_bilibili.txt 文件或不设置）
+bilibili_cookie = ""
+# YouTube Cookie（留空则使用 cookie_youtube.txt 文件或不设置）
+youtube_cookie = ""
+
+[ai]
+max_context_tokens = 64000
+
+[[ai.models]]
+name = "qwen-plus"
+url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+key = "YOUR_API_KEY"
+
+[[ai.models]]
+# 示例：本地 Ollama 模型，key 可随意填写
+name = "gemma4:e2b"
+url = "http://127.0.0.1:11434/v1"
+key = "ollama"
+
+[whisper]
+# Whisper 模型大小: tiny, base, small, medium, large
+model_size = "base"
+
+[data]
+dir = "./data"
+
+[uploader]
+# 启用的上传方式，可选: http_put, telegram
+type = ["http_put"]
+
+[uploader.http_put]
+enabled = true
+url = "https://your-server.example.com:8556"
+token = "YOUR_UPLOAD_TOKEN"
+
+[uploader.telegram]
+enabled = true
