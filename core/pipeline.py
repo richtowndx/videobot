@@ -150,6 +150,8 @@ class Pipeline:
                 return None
 
             markdown = self.summarizer.summarize(task.title, text_content)
+            if self.summarizer._last_model_name:
+                markdown = f"*AI 模型：{self.summarizer._last_model_name}*\n\n---\n\n" + markdown
             mem_after_summary = _mem_mb()
             logger.info(f"[MEM] After summarization [mem: {mem_after_summary:.0f}MB, delta: {mem_after_summary-mem_before_summary:.0f}MB]")
 

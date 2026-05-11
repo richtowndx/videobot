@@ -106,6 +106,7 @@ class LLMSummarizer:
     READ_TIMEOUT = 180.0
 
     def __init__(self):
+        self._last_model_name: str | None = None
         self._models: list[_ModelClient] = []
         for mc in AIConfig.load_models():
             client = OpenAI(
@@ -138,7 +139,9 @@ class LLMSummarizer:
         for mc in self._models:
             try:
                 logger.info(f"Calling {label} (model={mc.config.name})")
-                return fn(mc.client, mc.config.name)
+                result = fn(mc.client, mc.config.name)
+                self._last_model_name = mc.config.name
+                return result
             except (APITimeoutError, APIConnectionError, RateLimitError, httpx.TimeoutException) as e:
                 last_err = e
                 logger.warning(f"{label} failed on {mc.config.name}: {type(e).__name__}: {e}")
