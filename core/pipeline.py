@@ -1,15 +1,28 @@
 import gc
+import ctypes
 import logging
 import resource
 import threading
+import time
 from dataclasses import dataclass
 
-from config import DataConfig
+from config import DataConfig, PipelineConfig
 from core.task_manager import TaskManager, Task, TaskState
 from downloaders import get_downloader
 from summarizer.llm import LLMSummarizer
 
 logger = logging.getLogger(__name__)
+
+# glibc: release freed heap pages back to OS
+try:
+    _libc = ctypes.CDLL("libc.so.6")
+except OSError:
+    _libc = None
+
+
+def _malloc_trim():
+    if _libc:
+        _libc.malloc_trim(0)
 
 
 def _mem_mb():
@@ -28,6 +41,7 @@ class PipelineResult:
     task_id: str
     title: str
     markdown: str
+    model_name: str | None = None
 
 
 class Pipeline:
@@ -50,7 +64,6 @@ class Pipeline:
     def transcriber(self):
         if self._transcriber is None:
             with self._transcriber_lock:
-                # Double-check after acquiring lock
                 if self._transcriber is None:
                     from transcriber.whisper import WhisperTranscriber
                     self._transcriber = WhisperTranscriber()
@@ -68,114 +81,32 @@ class Pipeline:
         mem_start = _mem_mb()
         logger.info(f"[MEM] Pipeline start for {task.task_id} [mem: {mem_start:.0f}MB]")
 
-        # Memory check
-        if mem_start > 1024:
-            logger.warning(f"[MEM] Memory {mem_start:.0f}MB exceeds 1024MB threshold, rejecting task")
-            self.task_manager.update_state(task, TaskState.FAILED, error="Server memory too high, try later")
-            return None
+        # Memory check: gc + malloc_trim + wait loop
+        threshold = PipelineConfig.MEM_THRESHOLD_MB
+        if mem_start > threshold:
+            logger.warning(f"[MEM] Memory {mem_start:.0f}MB exceeds {threshold}MB threshold, waiting...")
+            waited = 0
+            interval = PipelineConfig.MEM_WAIT_INTERVAL
+            deadline = PipelineConfig.MEM_WAIT_SECONDS
+            while waited < deadline:
+                gc.collect()
+                _malloc_trim()
+                cur = _mem_mb()
+                if cur <= threshold:
+                    logger.info(f"[MEM] Memory recovered to {cur:.0f}MB after {waited}s wait")
+                    break
+                logger.info(f"[MEM] Still {cur:.0f}MB, waiting {interval}s ({waited}/{deadline}s)...")
+                time.sleep(interval)
+                waited += interval
+            else:
+                cur = _mem_mb()
+                logger.warning(f"[MEM] Memory still {cur:.0f}MB after {deadline}s wait, proceeding anyway")
+                gc.collect()
+                _malloc_trim()
 
         self.set_processing(True)
         try:
-            # Step 1: Check if already completed
-            cached = self.task_manager.get_cached_result(task.task_id)
-            if cached:
-                logger.info(f"Returning cached result for {task.task_id}")
-                return PipelineResult(task_id=task.task_id, title=task.title or "video", markdown=cached)
-
-            # Reset failed task so pipeline can retry from last successful step
-            if task.state == TaskState.FAILED:
-                logger.info(f"Retrying previously failed task {task.task_id}")
-                task.error = None
-                self.task_manager.update_state(task, TaskState.PENDING)
-
-            downloader = get_downloader(task.platform)
-
-            # Step 2: Extract video info for title
-            try:
-                info = downloader.extract_info(url)
-                task.title = info.get("title", "Unknown Video")
-            except Exception as e:
-                logger.warning(f"Failed to extract info: {e}")
-                task.title = "Unknown Video"
-
-            # Step 3: Try subtitle extraction (fast path)
-            subtitle_text = None
-            if not self.task_manager.has_subtitle(task):
-                self.task_manager.update_state(task, TaskState.DOWNLOADING)
-                try:
-                    subtitle_text = downloader.extract_subtitles(url)
-                    if subtitle_text:
-                        self.task_manager.save_subtitle(task, subtitle_text)
-                        logger.info(f"Subtitles extracted ({len(subtitle_text)} chars)")
-                except Exception as e:
-                    logger.warning(f"Subtitle extraction failed: {e}")
-            else:
-                subtitle_text = self.task_manager.load_subtitle(task)
-
-            # Step 4: Download audio if no subtitles
-            audio_text = None
-            if not subtitle_text:
-                if not self.task_manager.has_audio(task):
-                    self.task_manager.update_state(task, TaskState.DOWNLOADING)
-                    result = downloader.download_audio(url, str(task.task_dir))
-                    task.title = result.title or task.title
-                    logger.info(f"Audio downloaded: {result.file_path}")
-
-                # Step 5: Transcribe audio
-                if not self.task_manager.has_transcript(task):
-                    self.task_manager.update_state(task, TaskState.TRANSCRIBING)
-                    gc.collect()
-                    mem_before_transcribe = _mem_mb()
-                    logger.info(f"[MEM] Before transcription [mem: {mem_before_transcribe:.0f}MB]")
-                    audio_path = str(task.audio_file)
-                    audio_text = self.transcriber.transcript(audio_path)
-                    mem_after_transcribe = _mem_mb()
-                    logger.info(f"[MEM] After transcription [mem: {mem_after_transcribe:.0f}MB, delta: {mem_after_transcribe-mem_before_transcribe:.0f}MB]")
-                    self.task_manager.save_transcript(task, audio_text)
-                    logger.info(f"Transcription done ({len(audio_text)} chars)")
-                    gc.collect()
-                    mem_after_gc = _mem_mb()
-                    logger.info(f"[MEM] After GC [mem: {mem_after_gc:.0f}MB]")
-                else:
-                    audio_text = self.task_manager.load_transcript(task)
-
-            # Step 6: Summarize
-            self.task_manager.update_state(task, TaskState.SUMMARIZING)
-            mem_before_summary = _mem_mb()
-            logger.info(f"[MEM] Before summarization [mem: {mem_before_summary:.0f}MB]")
-            text_content = subtitle_text or audio_text or ""
-            if not text_content:
-                logger.error("No text content available for summarization")
-                self.task_manager.update_state(task, TaskState.FAILED, error="No text content")
-                return None
-
-            markdown = self.summarizer.summarize(task.title, text_content)
-            if self.summarizer._last_model_name:
-                markdown = f"*AI 模型：{self.summarizer._last_model_name}*\n\n---\n\n" + markdown
-            mem_after_summary = _mem_mb()
-            logger.info(f"[MEM] After summarization [mem: {mem_after_summary:.0f}MB, delta: {mem_after_summary-mem_before_summary:.0f}MB]")
-
-            # Step 7: Save and cleanup
-            self.task_manager.save_note(task, markdown)
-            self.task_manager.update_state(task, TaskState.COMPLETED)
-            mem_before_cleanup = _mem_mb()
-            logger.info(f"[MEM] Before cleanup [mem: {mem_before_cleanup:.0f}MB]")
-            self.task_manager.cleanup_task_files(task)
-
-            # Unload Whisper model to free memory between tasks
-            if self._transcriber is not None:
-                del self._transcriber
-                self._transcriber = None
-                logger.info("Whisper model unloaded")
-            gc.collect()
-
-            mem_after_cleanup = _mem_mb()
-            logger.info(f"[MEM] After cleanup [mem: {mem_after_cleanup:.0f}MB, released: {mem_before_cleanup-mem_after_cleanup:.0f}MB]")
-
-            mem_end = _mem_mb()
-            logger.info(f"[MEM] Pipeline completed for {task.task_id} [mem: {mem_end:.0f}MB, delta: {mem_end-mem_start:.0f}MB]")
-            return PipelineResult(task_id=task.task_id, title=task.title, markdown=markdown)
-
+            return self._do_process(url, task, mem_start)
         except Exception as e:
             mem_err = _mem_mb()
             logger.error(f"Pipeline failed for {task.task_id}: {e} [mem: {mem_err:.0f}MB, delta: {mem_err-mem_start:.0f}MB]", exc_info=True)
@@ -183,3 +114,101 @@ class Pipeline:
             return None
         finally:
             self.set_processing(False)
+
+    def _do_process(self, url: str, task: Task, mem_start: float) -> PipelineResult | None:
+        # Step 1: Check if already completed
+        cached = self.task_manager.get_cached_result(task.task_id)
+        if cached:
+            logger.info(f"Returning cached result for {task.task_id}")
+            return PipelineResult(task_id=task.task_id, title=task.title or "video", markdown=cached)
+
+        # Reset failed task so pipeline can retry from last successful step
+        if task.state == TaskState.FAILED:
+            logger.info(f"Retrying previously failed task {task.task_id}")
+            task.error = None
+            self.task_manager.update_state(task, TaskState.PENDING)
+
+        downloader = get_downloader(task.platform)
+
+        # Step 2: Extract video info for title
+        try:
+            info = downloader.extract_info(url)
+            task.title = info.get("title", "Unknown Video")
+        except Exception as e:
+            logger.warning(f"Failed to extract info: {e}")
+            task.title = "Unknown Video"
+
+        # Step 3: Try subtitle extraction (fast path)
+        subtitle_text = None
+        if not self.task_manager.has_subtitle(task):
+            self.task_manager.update_state(task, TaskState.DOWNLOADING)
+            try:
+                subtitle_text = downloader.extract_subtitles(url)
+                if subtitle_text:
+                    self.task_manager.save_subtitle(task, subtitle_text)
+                    logger.info(f"Subtitles extracted ({len(subtitle_text)} chars)")
+            except Exception as e:
+                logger.warning(f"Subtitle extraction failed: {e}")
+        else:
+            subtitle_text = self.task_manager.load_subtitle(task)
+
+        # Step 4: Download audio if no subtitles
+        audio_text = None
+        if not subtitle_text:
+            if not self.task_manager.has_audio(task):
+                self.task_manager.update_state(task, TaskState.DOWNLOADING)
+                result = downloader.download_audio(url, str(task.task_dir))
+                task.title = result.title or task.title
+                logger.info(f"Audio downloaded: {result.file_path}")
+
+            # Step 5: Transcribe audio (Whisper model stays loaded)
+            if not self.task_manager.has_transcript(task):
+                self.task_manager.update_state(task, TaskState.TRANSCRIBING)
+                gc.collect()
+                mem_before = _mem_mb()
+                logger.info(f"[MEM] Before transcription [mem: {mem_before:.0f}MB]")
+                audio_path = str(task.audio_file)
+                audio_text = self.transcriber.transcript(audio_path)
+                mem_after = _mem_mb()
+                logger.info(f"[MEM] After transcription [mem: {mem_after:.0f}MB, delta: {mem_after-mem_before:.0f}MB]")
+                self.task_manager.save_transcript(task, audio_text)
+                logger.info(f"Transcription done ({len(audio_text)} chars)")
+                # Free transcription intermediates
+                del audio_text
+                audio_text = self.task_manager.load_transcript(task)
+                gc.collect()
+                _malloc_trim()
+                logger.info(f"[MEM] After GC+trim [mem: {_mem_mb():.0f}MB]")
+            else:
+                audio_text = self.task_manager.load_transcript(task)
+
+        # Step 6: Summarize
+        self.task_manager.update_state(task, TaskState.SUMMARIZING)
+        mem_before_summary = _mem_mb()
+        logger.info(f"[MEM] Before summarization [mem: {mem_before_summary:.0f}MB]")
+        text_content = subtitle_text or audio_text or ""
+        if not text_content:
+            logger.error("No text content available for summarization")
+            self.task_manager.update_state(task, TaskState.FAILED, error="No text content")
+            return None
+
+        markdown = self.summarizer.summarize(task.title, text_content)
+        # Free source text immediately
+        del text_content, subtitle_text, audio_text
+        mem_after_summary = _mem_mb()
+        logger.info(f"[MEM] After summarization [mem: {mem_after_summary:.0f}MB, delta: {mem_after_summary-mem_before_summary:.0f}MB]")
+
+        # Step 7: Save and cleanup task files
+        model_name = self.summarizer._last_model_name
+        task.model_name = model_name if isinstance(model_name, str) else None
+        self.task_manager.save_note(task, markdown)
+        self.task_manager.update_state(task, TaskState.COMPLETED)
+        self.task_manager.cleanup_task_files(task)
+
+        # Aggressive cleanup between tasks
+        gc.collect()
+        _malloc_trim()
+
+        mem_end = _mem_mb()
+        logger.info(f"[MEM] Pipeline completed for {task.task_id} [mem: {mem_end:.0f}MB, delta: {mem_end-mem_start:.0f}MB]")
+        return PipelineResult(task_id=task.task_id, title=task.title, markdown=markdown, model_name=self.summarizer._last_model_name)

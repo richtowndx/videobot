@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import time
 
 from aiogram import types
 from aiogram.filters import Command
@@ -109,13 +110,18 @@ async def _process_single_url(
     if is_cached and task.state == TaskState.COMPLETED:
         cached = task_manager.get_cached_result(task.task_id)
         if cached:
-            await _send_note(message, task.title or "video", task.platform, url, cached)
+            # Load model_name from status.json for complete header
+            full_task = task_manager.get_task(task.task_id)
+            model_name = full_task.model_name if full_task else None
+            await _send_note(message, task.title or "video", task.platform, url, cached, model_name)
             return True, ""
 
     prefix = f"[{index}/{total}] " if total > 1 else ""
     last_error = ""
 
     for attempt in range(1, MAX_RETRIES + 1):
+        if attempt > 1:
+            await asyncio.sleep(5)
         try:
             retry_hint = f" (attempt {attempt}/{MAX_RETRIES})" if attempt > 1 else ""
             await status_msg.edit_text(f"{prefix}Processing{retry_hint}...")
@@ -125,7 +131,7 @@ async def _process_single_url(
             )
 
             if result:
-                await _send_note(message, result.title, platform, url, result.markdown)
+                await _send_note(message, result.title, platform, url, result.markdown, result.model_name)
                 return True, ""
             else:
                 last_error = task.error or "Pipeline returned no result"
@@ -168,8 +174,8 @@ async def handle_message(message: types.Message):
     await _queue.put((message, urls, status_msg))
 
 
-async def _send_note(message: types.Message, title: str, platform: str, url: str, markdown: str):
-    content = build_markdown(title, platform, url, markdown)
+async def _send_note(message: types.Message, title: str, platform: str, url: str, markdown: str, model_name: str | None = None):
+    content = build_markdown(title, platform, url, markdown, model_name)
     file_path = save_temp_markdown(title, content)
 
     try:

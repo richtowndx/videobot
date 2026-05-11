@@ -3,12 +3,14 @@ import tempfile
 from datetime import datetime
 
 
-def build_markdown(title: str, platform: str, url: str, summary: str) -> str:
+def build_markdown(title: str, platform: str, url: str, summary: str, model_name: str | None = None) -> str:
+    generated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    model_line = f"\n> AI 模型：{model_name}" if model_name else ""
     header = f"""# {title}
 
 > Platform: {platform}
 > URL: {url}
-> Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+> Generated: {generated}{model_line}
 
 ---
 

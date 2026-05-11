@@ -25,6 +25,7 @@ class Task:
     state: TaskState = TaskState.PENDING
     title: Optional[str] = None
     error: Optional[str] = None
+    model_name: Optional[str] = None
 
     @property
     def task_dir(self) -> Path:
@@ -160,4 +161,5 @@ class TaskManager:
     def _load(self, path: Path) -> Task:
         data = json.loads(path.read_text(encoding="utf-8"))
         data["state"] = TaskState(data["state"])
+        data.setdefault("model_name", None)
         return Task(**data)
