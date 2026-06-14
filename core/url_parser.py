@@ -1,5 +1,6 @@
 import hashlib
 import re
+from typing import Optional
 from urllib.parse import urlparse
 
 
@@ -11,7 +12,7 @@ PLATFORM_MAP = {
 }
 
 
-def parse_platform(url: str) -> str | None:
+def parse_platform(url: str) -> Optional[str]:
     """Extract platform name from URL domain."""
     try:
         domain = urlparse(url).hostname or ""
@@ -49,7 +50,7 @@ def extract_urls(text: str) -> list[str]:
     return results
 
 
-def extract_url(text: str) -> str | None:
+def extract_url(text: str) -> Optional[str]:
     """Extract the first supported video URL from text."""
     urls = extract_urls(text)
     return urls[0] if urls else None

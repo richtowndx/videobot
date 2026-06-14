@@ -73,11 +73,9 @@ class TaskManager:
         from core.url_parser import url_to_task_id
         task_id = url_to_task_id(url)
 
-        # Check for completed note first
         note_file = DataConfig.NOTES_DIR / f"{task_id}.md"
         if note_file.exists():
             task = Task(task_id=task_id, url=url, platform=platform, state=TaskState.COMPLETED)
-            # Try to load title from preserved status file
             existing = self.get_task(task_id)
             if existing and existing.title:
                 task.title = existing.title
@@ -138,8 +136,9 @@ class TaskManager:
             return None
         return task.subtitle_file.read_text(encoding="utf-8")
 
-    def save_note(self, task: Task, markdown: str):
-        task.note_file.write_text(markdown, encoding="utf-8")
+    def save_note(self, task: Task, content: str):
+        note_path = DataConfig.NOTES_DIR / f"{task.task_id}.md"
+        note_path.write_text(content, encoding="utf-8")
 
     def cleanup_task_files(self, task: Task):
         """Delete intermediate files (audio, video, transcript) but keep status."""

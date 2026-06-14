@@ -1,9 +1,10 @@
 import os
 import tempfile
 from datetime import datetime
+from typing import Optional
 
 
-def build_markdown(title: str, platform: str, url: str, summary: str, model_name: str | None = None) -> str:
+def build_markdown(title: str, platform: str, url: str, summary: str, model_name: Optional[str] = None) -> str:
     generated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     model_line = f"\n> AI 模型：{model_name}" if model_name else ""
     header = f"""# {title}
@@ -13,7 +14,6 @@ def build_markdown(title: str, platform: str, url: str, summary: str, model_name
 > Generated: {generated}{model_line}
 
 ---
-
 """
     return header + summary
 

@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import time
+from typing import Optional
 
 from aiogram import types
 from aiogram.filters import Command
@@ -23,7 +24,7 @@ uploader_manager = UploaderManager()
 MAX_RETRIES = 3
 
 # Task queue: serializes pipeline processing so requests don't get rejected
-_queue: asyncio.Queue | None = None
+_queue: Optional[asyncio.Queue] = None
 _worker_started = False
 
 
@@ -131,7 +132,7 @@ async def _process_single_url(
             )
 
             if result:
-                await _send_note(message, result.title, platform, url, result.markdown, result.model_name)
+                await _send_note(message, result.title, platform, url, result.content, result.model_name)
                 return True, ""
             else:
                 last_error = task.error or "Pipeline returned no result"
@@ -174,9 +175,9 @@ async def handle_message(message: types.Message):
     await _queue.put((message, urls, status_msg))
 
 
-async def _send_note(message: types.Message, title: str, platform: str, url: str, markdown: str, model_name: str | None = None):
-    content = build_markdown(title, platform, url, markdown, model_name)
-    file_path = save_temp_markdown(title, content)
+async def _send_note(message: types.Message, title: str, platform: str, url: str, content: str, model_name: Optional[str] = None):
+    full_content = build_markdown(title, platform, url, content, model_name)
+    file_path = save_temp_markdown(title, full_content)
 
     try:
         # Wire telegram uploader to send document via this message

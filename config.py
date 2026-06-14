@@ -1,6 +1,9 @@
 import os
 import sys
-import tomllib
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
 import platform
 import logging
 from dataclasses import dataclass
@@ -150,6 +153,13 @@ class AIConfig:
             return [ModelConfig(name=name, url=url, key=key, max_context_tokens=AIConfig.MAX_CONTEXT_TOKENS)]
 
         raise ValueError("No AI models configured. Set [ai.models] or ai.model_name/api_url/api_key in config.toml.")
+
+
+class PipelineConfig:
+    _pipeline = _cfg.get("pipeline", {})
+    MEM_THRESHOLD_MB = _pipeline.get("mem_threshold_mb", 1536)
+    MEM_WAIT_SECONDS = _pipeline.get("mem_wait_seconds", 30)
+    MEM_WAIT_INTERVAL = _pipeline.get("mem_wait_interval", 5)
 
 
 class WhisperConfig:

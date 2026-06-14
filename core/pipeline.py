@@ -5,6 +5,7 @@ import resource
 import threading
 import time
 from dataclasses import dataclass
+from typing import Optional
 
 from config import DataConfig, PipelineConfig
 from core.task_manager import TaskManager, Task, TaskState
@@ -31,17 +32,22 @@ def _mem_mb():
         with open("/proc/self/status") as f:
             for line in f:
                 if line.startswith("VmRSS:"):
-                    return int(line.split()[1]) / 1024
+                    return int(line.split()[1]) / 1024  # Linux: KB -> MB
     except Exception:
-        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+        pass
+    # macOS: ru_maxrss is in bytes, Linux kernel reports in KB
+    import sys
+    if sys.platform == "darwin":
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 * 1024)  # bytes -> MB
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024  # KB -> MB
 
 
 @dataclass
 class PipelineResult:
     task_id: str
     title: str
-    markdown: str
-    model_name: str | None = None
+    content: str
+    model_name: Optional[str] = None
 
 
 class Pipeline:
@@ -77,14 +83,14 @@ class Pipeline:
         with self._processing_lock:
             self._processing = value
 
-    def process(self, url: str, task: Task) -> PipelineResult | None:
+    def process(self, url: str, task: Task) -> Optional[PipelineResult]:
         mem_start = _mem_mb()
         logger.info(f"[MEM] Pipeline start for {task.task_id} [mem: {mem_start:.0f}MB]")
 
         # Memory check: gc + malloc_trim + wait loop
         threshold = PipelineConfig.MEM_THRESHOLD_MB
         if mem_start > threshold:
-            logger.warning(f"[MEM] Memory {mem_start:.0f}MB exceeds {threshold}MB threshold, waiting...")
+            logger.warning(f"[MEM] Memory {mem_start:.0f}MB exceeds {threshold}MB threshold, waiting up to {PipelineConfig.MEM_WAIT_SECONDS}s...")
             waited = 0
             interval = PipelineConfig.MEM_WAIT_INTERVAL
             deadline = PipelineConfig.MEM_WAIT_SECONDS
@@ -95,7 +101,6 @@ class Pipeline:
                 if cur <= threshold:
                     logger.info(f"[MEM] Memory recovered to {cur:.0f}MB after {waited}s wait")
                     break
-                logger.info(f"[MEM] Still {cur:.0f}MB, waiting {interval}s ({waited}/{deadline}s)...")
                 time.sleep(interval)
                 waited += interval
             else:
@@ -115,12 +120,12 @@ class Pipeline:
         finally:
             self.set_processing(False)
 
-    def _do_process(self, url: str, task: Task, mem_start: float) -> PipelineResult | None:
+    def _do_process(self, url: str, task: Task, mem_start: float) -> Optional[PipelineResult]:
         # Step 1: Check if already completed
         cached = self.task_manager.get_cached_result(task.task_id)
         if cached:
             logger.info(f"Returning cached result for {task.task_id}")
-            return PipelineResult(task_id=task.task_id, title=task.title or "video", markdown=cached)
+            return PipelineResult(task_id=task.task_id, title=task.title or "video", content=cached)
 
         # Reset failed task so pipeline can retry from last successful step
         if task.state == TaskState.FAILED:
@@ -211,4 +216,4 @@ class Pipeline:
 
         mem_end = _mem_mb()
         logger.info(f"[MEM] Pipeline completed for {task.task_id} [mem: {mem_end:.0f}MB, delta: {mem_end-mem_start:.0f}MB]")
-        return PipelineResult(task_id=task.task_id, title=task.title, markdown=markdown, model_name=self.summarizer._last_model_name)
+        return PipelineResult(task_id=task.task_id, title=task.title, content=markdown, model_name=self.summarizer._last_model_name)

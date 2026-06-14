@@ -1,4 +1,5 @@
 import logging
+from typing import Optional
 
 from config import _cfg
 from .base import BaseUploader, UploadResult
@@ -37,7 +38,7 @@ class UploaderManager:
             self._uploaders.append(instance)
             logger.info(f"Registered uploader: {name} (enabled={instance.enabled})")
 
-    def get_telegram_uploader(self) -> TelegramUploader | None:
+    def get_telegram_uploader(self) -> Optional[TelegramUploader]:
         for u in self._uploaders:
             if isinstance(u, TelegramUploader):
                 return u
