@@ -17,5 +17,5 @@ class BaseUploader:
     def __init__(self, enabled: bool = True, **kwargs):
         self.enabled = enabled
 
-    async def upload(self, file_path: str, title: str) -> UploadResult:
+    async def upload(self, file_path: str, title: str, suffix: str = "_summary") -> UploadResult:
         raise NotImplementedError

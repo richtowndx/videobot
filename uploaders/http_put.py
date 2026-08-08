@@ -9,9 +9,15 @@ from .base import BaseUploader, UploadResult
 logger = logging.getLogger(__name__)
 
 
-def _clean_filename(title: str) -> str:
-    """Keep only CJK, letters, digits; append -summary.md."""
+def _clean_filename(title: str, suffix: str = "_summary") -> str:
+    """生成远端文件名：保留 CJK/字母/数字，按 suffix 区分交付物类型。
+
+    - suffix ".mp3"（纠错转写稿）-> {name}.mp3.md（与本地 notes/{id}.mp3.md 命名一致）
+    - 其余（含默认 _summary，总结）-> {name}-summary.md
+    """
     name = re.sub(r"[^\w一-鿿]+", "", title[:80])
+    if suffix == ".mp3":
+        return f"{name}.mp3.md" if name else "transcript.mp3.md"
     return f"{name}-summary.md" if name else "summary.md"
 
 
@@ -23,11 +29,11 @@ class HttpPutUploader(BaseUploader):
         self.url = url.rstrip("/")
         self.token = token
 
-    async def upload(self, file_path: str, title: str) -> UploadResult:
+    async def upload(self, file_path: str, title: str, suffix: str = "_summary") -> UploadResult:
         if not self.enabled:
             return UploadResult(uploader=self.name, success=False, message="not enabled")
 
-        filename = _clean_filename(title)
+        filename = _clean_filename(title, suffix)
         upload_url = f"{self.url}/upload/{filename}"
 
         try:

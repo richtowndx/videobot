@@ -17,7 +17,8 @@ class TelegramUploader(BaseUploader):
         Called to deliver the document via Telegram bot."""
         self._message_func = send_func
 
-    async def upload(self, file_path: str, title: str) -> UploadResult:
+    async def upload(self, file_path: str, title: str, suffix: str = "_summary") -> UploadResult:
+        # suffix 仅供 HTTP/文件命名类上传器使用；Telegram 用文件名本身区分，此处忽略
         if not self.enabled:
             return UploadResult(uploader=self.name, success=False, message="not enabled")
 

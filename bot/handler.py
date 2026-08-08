@@ -193,7 +193,7 @@ async def _send_note(message: types.Message, title: str, platform: str, url: str
     for suffix, deliverable_content in deliverables:
         file_path = save_temp_markdown(title, deliverable_content, suffix=suffix)
         try:
-            results = await uploader_manager.upload(file_path, title)
+            results = await uploader_manager.upload(file_path, title, suffix=suffix)
             for r in results:
                 if r.success:
                     success_names.append(f"{r.uploader}({suffix})")

@@ -44,11 +44,11 @@ class UploaderManager:
                 return u
         return None
 
-    async def upload(self, file_path: str, title: str) -> list[UploadResult]:
+    async def upload(self, file_path: str, title: str, suffix: str = "_summary") -> list[UploadResult]:
         results: list[UploadResult] = []
         for uploader in self._uploaders:
             try:
-                result = await uploader.upload(file_path, title)
+                result = await uploader.upload(file_path, title, suffix)
             except Exception as e:
                 result = UploadResult(
                     uploader=uploader.name, success=False, message=str(e)
