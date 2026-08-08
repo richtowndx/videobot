@@ -93,6 +93,18 @@ REFINE_SYSTEM_PROMPT = """你是一个专业的笔记助手，正在分阶段处
 8. 在笔记末尾保留/更新一段专业的 **AI 总结**。
 """
 
+CORRECTION_SYSTEM_PROMPT = """你是一个专业的文字校对助手。输入是一段视频语音转文字（ASR）的原始结果，可能包含错别字、同音字错误、标点缺失、专有名词错误等问题。
+
+铁律（最高优先级，必须严格遵守）：
+1. **只纠错，不改写、不删减、不总结、不扩写**：保留全部信息量、原始语序与段落结构，逐句对照修正。
+2. 重点修正：同音/近音错别字（如"人工只能"→"人工智能"）、专有名词/技术术语/人名/产品名、明显断句与标点缺失。
+3. 不确定处保留原样，禁止臆测或捏造内容。
+4. 不要输出任何解释、批注、标题或 Markdown 格式符号，只输出校对后的正文。
+5. 输出语言跟随原文：中文输出简体中文，英文输出英文，不要翻译。
+
+仅返回校对后的纯文本正文。
+"""
+
 
 # 强化的语言约束：注入到 user_content 的开头，对小模型最有效（primacy 效应）
 LANGUAGE_REQUIREMENT = """⚠️ 语言要求（最高优先级，必须严格遵守）：
@@ -189,6 +201,10 @@ class LLMSummarizer:
         self.refine_chunk_char_limit = self.chunk_char_limit - int(REFINE_EXTRA_RESERVED / CHARS_PER_TOKEN)
         logger.info(f"Chunk size: {self.chunk_char_limit} chars, refine chunk: {self.refine_chunk_char_limit} chars")
 
+        # 纠错块大小复用上下文窗口（与总结同源），仅 overlap 不同
+        self.correction_chunk_char_limit = self.chunk_char_limit
+        logger.info(f"Correction chunk size: {self.correction_chunk_char_limit} chars")
+
         self._check_connectivity()
 
     def _wrap_user_content(self, inner: str) -> str:
@@ -220,6 +236,42 @@ class LLMSummarizer:
                 logger.warning(f"{label} failed on {mc.config.name}: HTTP {e.status_code} — {e.message}")
 
         raise RuntimeError(f"All {len(self._models)} model(s) failed for {label}") from last_err
+
+    def correct(self, text: str) -> str:
+        """对 ASR 原始转写做纠错。无损：保留全部内容，仅修正错误。
+        复用上下文窗口分块、overlap=0，逐块纠错后按顺序拼接。
+        截断/空响应由 _extract_content 抛 EmptyLLMResponseError，经 _call_with_fallback 自动切模型。"""
+        if not text:
+            return text
+
+        chunks = _split_chunks(text, chunk_size=self.correction_chunk_char_limit, overlap=0)
+        logger.info(f"Correcting transcript ({len(text)} chars, {len(chunks)} chunk(s))")
+
+        parts = []
+        for i, chunk in enumerate(chunks, start=1):
+            corrected = self._correct_single(chunk)
+            parts.append(corrected)
+            logger.info(f"Corrected chunk {i}/{len(chunks)} ({len(corrected)} chars)")
+
+        return "".join(parts)
+
+    def _correct_single(self, chunk: str) -> str:
+        def _fn(client, model):
+            user_content = f"原始转写文本：\n{chunk}"
+            kwargs = dict(temperature=0.1)
+            if _is_reasoning_model(model):
+                kwargs["reasoning_effort"] = "low"
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": CORRECTION_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_content},
+                ],
+                **kwargs,
+            )
+            return _extract_content(response, "correct")
+
+        return self._call_with_fallback(_fn, "correct")
 
     def summarize(self, title: str, transcript: str) -> str:
         text_len = len(transcript)
