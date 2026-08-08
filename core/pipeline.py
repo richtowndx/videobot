@@ -159,6 +159,7 @@ class Pipeline:
 
         # Step 4: Download audio if no subtitles
         audio_text = None
+        corrected_text = None
         if not subtitle_text:
             if not self.task_manager.has_audio(task):
                 self.task_manager.update_state(task, TaskState.DOWNLOADING)
@@ -187,11 +188,38 @@ class Pipeline:
             else:
                 audio_text = self.task_manager.load_transcript(task)
 
+        # Step 5.5: Correct transcript (only when audio was transcribed, not subtitles)
+        if not subtitle_text and audio_text:
+            if not self.task_manager.has_corrected(task):
+                gc.collect()
+                mem_before_corr = _mem_mb()
+                logger.info(f"[MEM] Before correction [mem: {mem_before_corr:.0f}MB]")
+                try:
+                    corrected_text = self.summarizer.correct(audio_text)
+                    self.task_manager.save_corrected(task, corrected_text)
+                    from bot.formatter import build_transcript_markdown
+                    mp3_md = build_transcript_markdown(task.title or "video", url, corrected_text)
+                    mp3_md_path = self.data_config.NOTES_DIR / f"{task.task_id}.mp3.md"
+                    mp3_md_path.write_text(mp3_md, encoding="utf-8")
+                    logger.info(f"Corrected transcript ({len(corrected_text)} chars) -> {mp3_md_path}")
+                    gc.collect()
+                    _malloc_trim()
+                    logger.info(f"[MEM] After correction+trim [mem: {_mem_mb():.0f}MB]")
+                except Exception as e:
+                    logger.warning(
+                        f"Transcript correction failed, falling back to raw transcript: {e}",
+                        exc_info=True,
+                    )
+                    self.task_manager.update_state(task, task.state, correction_failed=True)
+                    corrected_text = None
+            else:
+                corrected_text = self.task_manager.load_corrected(task)
+
         # Step 6: Summarize
         self.task_manager.update_state(task, TaskState.SUMMARIZING)
         mem_before_summary = _mem_mb()
         logger.info(f"[MEM] Before summarization [mem: {mem_before_summary:.0f}MB]")
-        text_content = subtitle_text or audio_text or ""
+        text_content = corrected_text or subtitle_text or audio_text or ""
         if not text_content:
             logger.error("No text content available for summarization")
             self.task_manager.update_state(task, TaskState.FAILED, error="No text content")

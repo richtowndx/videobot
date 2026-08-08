@@ -97,6 +97,7 @@ def test_resume_from_transcription():
         pipeline._transcriber = mock_transcriber_ok
 
         mock_summarizer = mock.MagicMock()
+        mock_summarizer.correct.return_value = "Corrected transcript."
         mock_summarizer.summarize.return_value = "# Video Summary\n\nTest content."
         pipeline._summarizer = mock_summarizer
 
@@ -144,6 +145,7 @@ def test_resume_from_summarization():
         pipeline._transcriber = mock_transcriber
 
         mock_summarizer_fail = mock.MagicMock()
+        mock_summarizer_fail.correct.return_value = "Corrected transcript."
         mock_summarizer_fail.summarize.side_effect = RuntimeError("LLM API timeout")
         pipeline._summarizer = mock_summarizer_fail
 
@@ -225,6 +227,7 @@ def test_multi_step_resume():
         pipeline._transcriber = mock_t2
 
         mock_s2 = mock.MagicMock()
+        mock_s2.correct.return_value = "Corrected transcript."
         mock_s2.summarize.side_effect = RuntimeError("API rate limit exceeded")
         pipeline._summarizer = mock_s2
 
@@ -313,8 +316,13 @@ def test_intermediate_file_states():
         assert task_manager.has_audio(task)
         assert task_manager.has_transcript(task)
         assert task_manager.can_resume_from_transcription(task)
+        assert not task_manager.can_resume_from_summarization(task), "仅有 transcript 不应能续传至总结"
+        print("  State 2: audio + transcript -> still needs correction ✓")
+
+        # State 2b: After correction (simulate corrected file)
+        task_manager.save_corrected(task, "Corrected content.")
         assert task_manager.can_resume_from_summarization(task)
-        print("  State 2: audio + transcript -> can_resume_from_summarization ✓")
+        print("  State 2b: + corrected -> can_resume_from_summarization ✓")
 
         # State 3: After completion (simulate note + cleanup)
         task_manager.save_note(task, "# Summary")
@@ -331,6 +339,120 @@ def test_intermediate_file_states():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ── Test 5: Correction failure falls back to raw transcript ────────────────
+
+def test_correction_failure_falls_back_to_raw():
+    """纠错抛错时，流水线降级用原始转写总结、不写 .mp3.md、标记 correction_failed。"""
+    tmp = tempfile.mkdtemp(prefix="test_corr_fail_")
+    _setup(tmp)
+    try:
+        from config import DataConfig
+        url = BILIBILI_URL
+        task_manager = TaskManager()
+        pipeline = Pipeline()
+        task, _ = task_manager.get_or_create(url, "bilibili")
+
+        mock_transcriber = mock.MagicMock()
+        mock_transcriber.transcript.return_value = "RAW TRANSCRIPT TEXT"
+        pipeline._transcriber = mock_transcriber
+
+        mock_summarizer = mock.MagicMock()
+        mock_summarizer.correct.side_effect = RuntimeError("all models failed")
+        mock_summarizer.summarize.return_value = "# Summary"
+        pipeline._summarizer = mock_summarizer
+
+        with mock.patch("core.pipeline.get_downloader", return_value=_mock_downloader()):
+            result = pipeline.process(url, task)
+
+        assert result is not None, "纠错失败不应阻断流水线"
+        assert task.state == TaskState.COMPLETED
+        assert task.correction_failed is True
+        # 总结吃的是原始转写（未纠错）
+        mock_summarizer.summarize.assert_called_once()
+        summarize_args = mock_summarizer.summarize.call_args
+        text_arg = summarize_args.args[1] if len(summarize_args.args) > 1 else summarize_args.args[0]
+        assert text_arg == "RAW TRANSCRIPT TEXT"
+        # 未产出 .mp3.md
+        assert not (DataConfig.NOTES_DIR / f"{task.task_id}.mp3.md").exists()
+        print("test_correction_failure_falls_back_to_raw PASSED\n")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ── Test 6: Correction writes .mp3.md and feeds summary ─────────────────────
+
+def test_correction_writes_mp3md_and_feeds_summary():
+    """正常纠错：写出 notes/{id}.mp3.md，总结吃纠错稿而非原始转写。"""
+    tmp = tempfile.mkdtemp(prefix="test_corr_ok_")
+    _setup(tmp)
+    try:
+        from config import DataConfig
+        url = BILIBILI_URL
+        task_manager = TaskManager()
+        pipeline = Pipeline()
+        task, _ = task_manager.get_or_create(url, "bilibili")
+
+        mock_transcriber = mock.MagicMock()
+        mock_transcriber.transcript.return_value = "RAW TEXT"
+        pipeline._transcriber = mock_transcriber
+
+        mock_summarizer = mock.MagicMock()
+        mock_summarizer.correct.return_value = "CORRECTED TEXT"
+        mock_summarizer.summarize.return_value = "# Summary"
+        pipeline._summarizer = mock_summarizer
+
+        with mock.patch("core.pipeline.get_downloader", return_value=_mock_downloader()):
+            result = pipeline.process(url, task)
+
+        assert result is not None
+        assert task.state == TaskState.COMPLETED
+        # .mp3.md 已写入并含纠错正文
+        mp3 = DataConfig.NOTES_DIR / f"{task.task_id}.mp3.md"
+        assert mp3.exists(), "纠错稿 .mp3.md 应已写入"
+        assert "CORRECTED TEXT" in mp3.read_text(encoding="utf-8")
+        # 总结吃的是纠错稿
+        text_arg = mock_summarizer.summarize.call_args.args[1]
+        assert text_arg == "CORRECTED TEXT"
+        print("test_correction_writes_mp3md_and_feeds_summary PASSED\n")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ── Test 7: Subtitle path skips correction ──────────────────────────────────
+
+def test_subtitle_path_skips_correction():
+    """字幕路径不纠错、不写 .mp3.md，但仍走总结。"""
+    tmp = tempfile.mkdtemp(prefix="test_sub_")
+    _setup(tmp)
+    try:
+        from config import DataConfig
+        url = BILIBILI_URL
+        task_manager = TaskManager()
+        pipeline = Pipeline()
+        task, _ = task_manager.get_or_create(url, "bilibili")
+
+        # downloader 返回字幕、不下载音频
+        dl = mock.MagicMock()
+        dl.extract_info.return_value = {"title": "Subtitled Video"}
+        dl.extract_subtitles.return_value = "SUBTITLE TEXT"
+
+        mock_summarizer = mock.MagicMock()
+        mock_summarizer.summarize.return_value = "# Summary"
+        pipeline._summarizer = mock_summarizer
+
+        with mock.patch("core.pipeline.get_downloader", return_value=dl):
+            result = pipeline.process(url, task)
+
+        assert result is not None
+        mock_summarizer.correct.assert_not_called()
+        mock_summarizer.summarize.assert_called_once()
+        assert mock_summarizer.summarize.call_args.args[1] == "SUBTITLE TEXT"
+        assert not (DataConfig.NOTES_DIR / f"{task.task_id}.mp3.md").exists()
+        print("test_subtitle_path_skips_correction PASSED\n")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ── Main runner ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -338,4 +460,7 @@ if __name__ == "__main__":
     test_resume_from_summarization()
     test_multi_step_resume()
     test_intermediate_file_states()
+    test_correction_failure_falls_back_to_raw()
+    test_correction_writes_mp3md_and_feeds_summary()
+    test_subtitle_path_skips_correction()
     print("All pipeline resume tests passed!")
