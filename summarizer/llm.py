@@ -228,19 +228,27 @@ class LLMSummarizer:
         return f"{LANGUAGE_GUARD_HEAD}{inner}{LANGUAGE_GUARD_TAIL}"
 
     def _check_connectivity(self):
-        """启动连通性探测：对每个配置的 provider 各发一次 GET /models，确认多模型兜底链可达。
+        """启动连通性探测：依次探测 provider，**首个可达即停止**。
+        兜底模型不预探——仅当主模型在实际调用中失败时，才由 _call_with_fallback 触及。
         仅在每个进程首次实例化 summarizer 时执行一次，不参与实际纠错/总结调用。"""
-        logger.info(
-            f"[startup] connectivity check for fallback chain: "
-            f"probing {len(self._models)} provider(s): "
-            f"{', '.join(m.config.name for m in self._models)}"
-        )
-        for mc in self._models:
+        for i, mc in enumerate(self._models):
             try:
                 mc.client.models.list()
-                logger.info(f"[startup] reachable: {mc.config.name} @ {mc.config.url}")
+                logger.info(f"[startup] reachable (primary): {mc.config.name} @ {mc.config.url}")
+                remaining = self._models[i + 1:]
+                if remaining:
+                    logger.info(
+                        f"[startup] using '{mc.config.name}' as primary; skipped connectivity "
+                        f"check for {len(remaining)} fallback provider(s): "
+                        f"{', '.join(m.config.name for m in remaining)}"
+                    )
+                return
             except Exception as e:
                 logger.warning(f"[startup] unreachable: {mc.config.name} @ {mc.config.url} — {e}")
+        logger.error(
+            f"[startup] all {len(self._models)} provider(s) unreachable; "
+            f"actual calls will fail at runtime"
+        )
 
     def _call_with_fallback(self, fn, label: str = "LLM call"):
         """Try fn(client, model_name) on each model in order, return first success."""

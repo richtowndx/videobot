@@ -82,6 +82,65 @@ def test_refine_prompt_has_soft_fallback():
     assert "非技术" in REFINE_SYSTEM_PROMPT
 
 
+@patch("summarizer.llm.OpenAI")
+@patch("summarizer.llm.AIConfig.load_models")
+def test_check_connectivity_stops_at_first_reachable(mock_load_models, mock_openai_cls):
+    """主 provider 可达时，只探主、不探兑底。"""
+    from config import ModelConfig
+    mock_load_models.return_value = [
+        ModelConfig(name="primary", url="http://p", key="k"),
+        ModelConfig(name="backup", url="http://b", key="k"),
+    ]
+    primary_client = MagicMock(); primary_client.models.list.return_value = []
+    backup_client = MagicMock(); backup_client.models.list.return_value = []
+    mock_openai_cls.side_effect = [primary_client, backup_client]
+
+    from summarizer.llm import LLMSummarizer
+    LLMSummarizer()  # __init__ -> _check_connectivity
+
+    primary_client.models.list.assert_called_once()   # 探了主
+    backup_client.models.list.assert_not_called()     # 兑底未探
+
+
+@patch("summarizer.llm.OpenAI")
+@patch("summarizer.llm.AIConfig.load_models")
+def test_check_connectivity_falls_through_to_backup(mock_load_models, mock_openai_cls):
+    """主不可达时，回落探兑底并停在其上。"""
+    from config import ModelConfig
+    mock_load_models.return_value = [
+        ModelConfig(name="primary", url="http://p", key="k"),
+        ModelConfig(name="backup", url="http://b", key="k"),
+    ]
+    primary_client = MagicMock(); primary_client.models.list.side_effect = RuntimeError("down")
+    backup_client = MagicMock(); backup_client.models.list.return_value = []
+    mock_openai_cls.side_effect = [primary_client, backup_client]
+
+    from summarizer.llm import LLMSummarizer
+    LLMSummarizer()
+
+    primary_client.models.list.assert_called_once()   # 主不可达，探了
+    backup_client.models.list.assert_called_once()    # 回落探 backup 并停
+
+
+@patch("summarizer.llm.OpenAI")
+@patch("summarizer.llm.AIConfig.load_models")
+def test_check_connectivity_all_unreachable_no_crash(mock_load_models, mock_openai_cls):
+    """全部不可达时不抛错（实际调用会在运行期失败）。"""
+    from config import ModelConfig
+    mock_load_models.return_value = [
+        ModelConfig(name="primary", url="http://p", key="k"),
+        ModelConfig(name="backup", url="http://b", key="k"),
+    ]
+    primary_client = MagicMock(); primary_client.models.list.side_effect = RuntimeError("down")
+    backup_client = MagicMock(); backup_client.models.list.side_effect = RuntimeError("down")
+    mock_openai_cls.side_effect = [primary_client, backup_client]
+
+    from summarizer.llm import LLMSummarizer
+    LLMSummarizer()  # 不抛
+    primary_client.models.list.assert_called_once()
+    backup_client.models.list.assert_called_once()
+
+
 if __name__ == "__main__":
     test_summarize()
     test_summarize_uses_config()
@@ -89,4 +148,7 @@ if __name__ == "__main__":
     test_system_prompt_has_soft_fallback()
     test_refine_prompt_has_four_knowledge_fields()
     test_refine_prompt_has_soft_fallback()
+    test_check_connectivity_stops_at_first_reachable()
+    test_check_connectivity_falls_through_to_backup()
+    test_check_connectivity_all_unreachable_no_crash()
     print("All summarizer tests passed!")
