@@ -26,6 +26,7 @@ class Task:
     title: Optional[str] = None
     error: Optional[str] = None
     model_name: Optional[str] = None
+    correction_failed: bool = False
 
     @property
     def task_dir(self) -> Path:
@@ -46,6 +47,10 @@ class Task:
     @property
     def transcript_file(self) -> Path:
         return self.task_dir / "transcript.json"
+
+    @property
+    def corrected_file(self) -> Path:
+        return self.task_dir / "corrected.json"
 
     @property
     def subtitle_file(self) -> Path:
@@ -95,6 +100,8 @@ class TaskManager:
             task.title = kwargs["title"]
         if "error" in kwargs:
             task.error = kwargs["error"]
+        if "correction_failed" in kwargs:
+            task.correction_failed = kwargs["correction_failed"]
         self._save(task)
 
     def get_cached_result(self, task_id: str) -> Optional[str]:
@@ -116,7 +123,7 @@ class TaskManager:
         return self.has_audio(task) or self.has_subtitle(task)
 
     def can_resume_from_summarization(self, task: Task) -> bool:
-        return self.has_transcript(task) or self.has_subtitle(task)
+        return self.has_corrected(task) or self.has_subtitle(task)
 
     def save_transcript(self, task: Task, text: str):
         data = {"full_text": text}
@@ -126,6 +133,19 @@ class TaskManager:
         if not task.transcript_file.exists():
             return None
         data = json.loads(task.transcript_file.read_text(encoding="utf-8"))
+        return data.get("full_text")
+
+    def has_corrected(self, task: Task) -> bool:
+        return task.corrected_file.exists()
+
+    def save_corrected(self, task: Task, text: str):
+        data = {"full_text": text}
+        task.corrected_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def load_corrected(self, task: Task) -> Optional[str]:
+        if not task.corrected_file.exists():
+            return None
+        data = json.loads(task.corrected_file.read_text(encoding="utf-8"))
         return data.get("full_text")
 
     def save_subtitle(self, task: Task, text: str):
@@ -161,4 +181,5 @@ class TaskManager:
         data = json.loads(path.read_text(encoding="utf-8"))
         data["state"] = TaskState(data["state"])
         data.setdefault("model_name", None)
+        data.setdefault("correction_failed", False)
         return Task(**data)

@@ -169,9 +169,69 @@ def test_resume_logic():
         (task.task_dir / "audio.mp3").write_bytes(b"fake")
         assert mgr.can_resume_from_transcription(task)
 
-        # Transcript exists - can resume from summarization
+        # Transcript exists but NOT enough to resume summarization (need corrected)
         mgr.save_transcript(task, "text")
+        assert not mgr.can_resume_from_summarization(task)
+
+        # Corrected exists -> can resume from summarization
+        mgr.save_corrected(task, "corrected text")
         assert mgr.can_resume_from_summarization(task)
+    finally:
+        teardown_temp_data(tmp)
+
+
+def test_corrected_save_load():
+    tmp = setup_temp_data(None)
+    try:
+        mgr = TaskManager()
+        task = mgr.create_task("abc123", "https://example.com", "youtube")
+        assert not mgr.has_corrected(task)
+        mgr.save_corrected(task, "纠错后的文本")
+        assert mgr.has_corrected(task)
+        assert mgr.load_corrected(task) == "纠错后的文本"
+    finally:
+        teardown_temp_data(tmp)
+
+
+def test_resume_logic_now_requires_corrected():
+    """新语义：仅有 transcript 不再算可续传至总结，需要 corrected（或 subtitle）。"""
+    tmp = setup_temp_data(None)
+    try:
+        mgr = TaskManager()
+        task = mgr.create_task("abc123", "https://example.com", "youtube")
+        mgr.save_transcript(task, "raw text")
+        assert not mgr.can_resume_from_summarization(task), "仅有 transcript 不应能续传至总结"
+        mgr.save_corrected(task, "corrected text")
+        assert mgr.can_resume_from_summarization(task), "有 corrected 后应能续传至总结"
+    finally:
+        teardown_temp_data(tmp)
+
+
+def test_load_backward_compat_without_correction_failed():
+    """老 status.json 没有 correction_failed 字段时，加载后默认 False。"""
+    tmp = setup_temp_data(None)
+    try:
+        mgr = TaskManager()
+        task = mgr.create_task("abc123", "https://example.com", "youtube")
+        import json as _json
+        data = _json.loads(task.status_file.read_text(encoding="utf-8"))
+        del data["correction_failed"]
+        task.status_file.write_text(_json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        loaded = mgr.get_task("abc123")
+        assert loaded is not None
+        assert loaded.correction_failed is False
+    finally:
+        teardown_temp_data(tmp)
+
+
+def test_update_state_persists_correction_failed():
+    tmp = setup_temp_data(None)
+    try:
+        mgr = TaskManager()
+        task = mgr.create_task("abc123", "https://example.com", "youtube")
+        mgr.update_state(task, TaskState.SUMMARIZING, correction_failed=True)
+        assert task.correction_failed is True
+        assert mgr.get_task("abc123").correction_failed is True
     finally:
         teardown_temp_data(tmp)
 
@@ -188,4 +248,8 @@ if __name__ == "__main__":
     test_cleanup_task_files()
     test_has_audio()
     test_resume_logic()
+    test_corrected_save_load()
+    test_resume_logic_now_requires_corrected()
+    test_load_backward_compat_without_correction_failed()
+    test_update_state_persists_correction_failed()
     print("All task_manager tests passed!")
