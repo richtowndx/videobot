@@ -59,7 +59,34 @@ def test_summarize_uses_config(mock_load_models, mock_openai_cls):
     assert call_kwargs["base_url"] == "http://test"
 
 
+def test_system_prompt_has_four_knowledge_fields():
+    from summarizer.llm import SYSTEM_PROMPT
+    for field in ("知识点说明", "逻辑细节", "相关联知识点", "完备性点评"):
+        assert field in SYSTEM_PROMPT, f"SYSTEM_PROMPT 缺少字段：{field}"
+
+
+def test_system_prompt_has_soft_fallback():
+    from summarizer.llm import SYSTEM_PROMPT
+    assert "非技术" in SYSTEM_PROMPT
+    assert "通用笔记格式" in SYSTEM_PROMPT
+
+
+def test_refine_prompt_has_four_knowledge_fields():
+    from summarizer.llm import REFINE_SYSTEM_PROMPT
+    for field in ("知识点说明", "逻辑细节", "相关联知识点", "完备性点评"):
+        assert field in REFINE_SYSTEM_PROMPT, f"REFINE_SYSTEM_PROMPT 缺少字段：{field}"
+
+
+def test_refine_prompt_has_soft_fallback():
+    from summarizer.llm import REFINE_SYSTEM_PROMPT
+    assert "非技术" in REFINE_SYSTEM_PROMPT
+
+
 if __name__ == "__main__":
     test_summarize()
     test_summarize_uses_config()
+    test_system_prompt_has_four_knowledge_fields()
+    test_system_prompt_has_soft_fallback()
+    test_refine_prompt_has_four_knowledge_fields()
+    test_refine_prompt_has_soft_fallback()
     print("All summarizer tests passed!")
