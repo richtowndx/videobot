@@ -61,6 +61,19 @@ def test_build_transcript_markdown():
     assert "https://example.com/v/1" in result
     assert "---" in result
     assert "纠错后的正文" in result
+    assert "AI 模型" not in result  # 不传 model_name 时不出现该行
+
+
+def test_build_transcript_markdown_with_model():
+    result = build_transcript_markdown("测试视频", "https://example.com/v/1", "纠错后的正文", model_name="step-3.7-flash")
+    assert "# 测试视频" in result
+    assert "https://example.com/v/1" in result
+    assert "纠错后的正文" in result
+    # AI 模型行出现在「来源」之后、分隔线之前
+    src_idx = result.index("来源：")
+    model_idx = result.index("AI 模型：step-3.7-flash")
+    sep_idx = result.index("---")
+    assert src_idx < model_idx < sep_idx
 
 
 def test_collect_deliverables_with_and_without_mp3():
@@ -92,5 +105,6 @@ if __name__ == "__main__":
     test_save_temp_markdown_sanitizes_filename()
     test_save_temp_markdown_custom_suffix()
     test_build_transcript_markdown()
+    test_build_transcript_markdown_with_model()
     test_collect_deliverables_with_and_without_mp3()
     print("All formatter tests passed!")

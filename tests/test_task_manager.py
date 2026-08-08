@@ -193,6 +193,27 @@ def test_corrected_save_load():
         teardown_temp_data(tmp)
 
 
+def test_corrected_model_name_persisted():
+    """save_corrected 带 model_name 时持久化；load_corrected_model 可读回；旧格式缺字段返回 None。"""
+    tmp = setup_temp_data(None)
+    try:
+        mgr = TaskManager()
+        task = mgr.create_task("abc123", "https://example.com", "youtube")
+
+        # 带 model_name 保存 -> 可读回
+        mgr.save_corrected(task, "纠错后的文本", model_name="step-3.7-flash")
+        assert mgr.load_corrected(task) == "纠错后的文本"
+        assert mgr.load_corrected_model(task) == "step-3.7-flash"
+
+        # 不带 model_name 保存（旧格式）-> 返回 None
+        task2 = mgr.create_task("def456", "https://example.com/2", "youtube")
+        mgr.save_corrected(task2, "另一段文本")
+        assert mgr.load_corrected(task2) == "另一段文本"
+        assert mgr.load_corrected_model(task2) is None
+    finally:
+        teardown_temp_data(tmp)
+
+
 def test_resume_logic_now_requires_corrected():
     """新语义：仅有 transcript 不再算可续传至总结，需要 corrected（或 subtitle）。"""
     tmp = setup_temp_data(None)

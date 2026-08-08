@@ -29,9 +29,11 @@ def save_temp_markdown(title: str, content: str, suffix: str = "_summary") -> st
     return path
 
 
-def build_transcript_markdown(title: str, url: str, text: str) -> str:
-    """纠错转写稿交付物（.mp3.md）的内容：极简头 + 纠错正文。"""
-    return f"# {title}\n\n> 来源：{url}\n\n---\n\n{text}"
+def build_transcript_markdown(title: str, url: str, text: str, model_name: Optional[str] = None) -> str:
+    """纠错转写稿交付物（.mp3.md）的内容：极简头 + 纠错正文。
+    model_name 非空时，在「来源」后追加「AI 模型」行（与总结头一致）。"""
+    model_line = f"\n> AI 模型：{model_name}" if model_name else ""
+    return f"# {title}\n\n> 来源：{url}{model_line}\n\n---\n\n{text}"
 
 
 def collect_deliverables(title, platform, url, summary, model_name=None, task_id=None, notes_dir=None):

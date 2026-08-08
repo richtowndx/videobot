@@ -138,8 +138,10 @@ class TaskManager:
     def has_corrected(self, task: Task) -> bool:
         return task.corrected_file.exists()
 
-    def save_corrected(self, task: Task, text: str):
+    def save_corrected(self, task: Task, text: str, model_name: Optional[str] = None):
         data = {"full_text": text}
+        if model_name:
+            data["model_name"] = model_name
         task.corrected_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def load_corrected(self, task: Task) -> Optional[str]:
@@ -147,6 +149,13 @@ class TaskManager:
             return None
         data = json.loads(task.corrected_file.read_text(encoding="utf-8"))
         return data.get("full_text")
+
+    def load_corrected_model(self, task: Task) -> Optional[str]:
+        """返回纠错所用模型名（旧版 corrected.json 无此字段则返回 None）。"""
+        if not task.corrected_file.exists():
+            return None
+        data = json.loads(task.corrected_file.read_text(encoding="utf-8"))
+        return data.get("model_name")
 
     def save_subtitle(self, task: Task, text: str):
         task.subtitle_file.write_text(text, encoding="utf-8")

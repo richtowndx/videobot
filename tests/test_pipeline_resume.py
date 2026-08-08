@@ -398,6 +398,7 @@ def test_correction_writes_mp3md_and_feeds_summary():
 
         mock_summarizer = mock.MagicMock()
         mock_summarizer.correct.return_value = "CORRECTED TEXT"
+        mock_summarizer._last_model_name = "step-3.7-flash"
         mock_summarizer.summarize.return_value = "# Summary"
         pipeline._summarizer = mock_summarizer
 
@@ -409,6 +410,10 @@ def test_correction_writes_mp3md_and_feeds_summary():
         # .mp3.md 已写入并含纠错正文
         mp3 = DataConfig.NOTES_DIR / f"{task.task_id}.mp3.md"
         assert mp3.exists(), "纠错稿 .mp3.md 应已写入"
+        mp3_content = mp3.read_text(encoding="utf-8")
+        assert "CORRECTED TEXT" in mp3_content
+        # 头部含纠错所用模型名（来源之后）
+        assert "AI 模型：step-3.7-flash" in mp3_content
         assert "CORRECTED TEXT" in mp3.read_text(encoding="utf-8")
         # 总结吃的是纠错稿
         text_arg = mock_summarizer.summarize.call_args.args[1]

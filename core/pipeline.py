@@ -196,9 +196,10 @@ class Pipeline:
                 logger.info(f"[MEM] Before correction [mem: {mem_before_corr:.0f}MB]")
                 try:
                     corrected_text = self.summarizer.correct(audio_text)
-                    self.task_manager.save_corrected(task, corrected_text)
+                    corr_model = self.summarizer._last_model_name
+                    self.task_manager.save_corrected(task, corrected_text, model_name=corr_model)
                     from bot.formatter import build_transcript_markdown
-                    mp3_md = build_transcript_markdown(task.title or "video", url, corrected_text)
+                    mp3_md = build_transcript_markdown(task.title or "video", url, corrected_text, model_name=corr_model)
                     mp3_md_path = self.data_config.NOTES_DIR / f"{task.task_id}.mp3.md"
                     mp3_md_path.write_text(mp3_md, encoding="utf-8")
                     logger.info(f"Corrected transcript ({len(corrected_text)} chars) -> {mp3_md_path}")
@@ -214,10 +215,11 @@ class Pipeline:
                     corrected_text = None
             else:
                 corrected_text = self.task_manager.load_corrected(task)
+                corr_model = self.task_manager.load_corrected_model(task)
                 mp3_md_path = self.data_config.NOTES_DIR / f"{task.task_id}.mp3.md"
                 if not mp3_md_path.exists():
                     from bot.formatter import build_transcript_markdown
-                    mp3_md_path.write_text(build_transcript_markdown(task.title or "video", url, corrected_text), encoding="utf-8")
+                    mp3_md_path.write_text(build_transcript_markdown(task.title or "video", url, corrected_text, model_name=corr_model), encoding="utf-8")
                     logger.info(f"Re-created missing corrected transcript -> {mp3_md_path}")
 
         # Step 6: Summarize
