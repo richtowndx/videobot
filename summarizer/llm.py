@@ -10,6 +10,45 @@ from config import AIConfig, ModelConfig
 
 logger = logging.getLogger(__name__)
 
+
+class EmptyLLMResponseError(RuntimeError):
+    """模型返回空内容（常见于推理模型把输出预算耗在 reasoning 上，content 被截断为空）。"""
+
+
+# 会进行 reasoning 的模型：这类模型传 reasoning_effort="low"（摘要/改写任务官方推荐低强度，
+# 既快又省 token，并避免推理耗尽输出预算）。非推理模型传该参数会被服务端拒绝。
+_REASONING_MODEL_PREFIXES = ("step-3", "step-router-v1")
+
+
+def _is_reasoning_model(name: str) -> bool:
+    return any(name.startswith(p) for p in _REASONING_MODEL_PREFIXES)
+
+
+def _extract_content(response, label: str) -> str:
+    """从响应中提取正文；空 content 或 finish_reason=length 视为失败（抛 EmptyLLMResponseError，
+    以便 _call_with_fallback 切换到下一个模型重试），并记录 finish_reason / token 用量。"""
+    choice = response.choices[0]
+    content = (choice.message.content or "").strip()
+    finish_reason = choice.finish_reason
+    usage = response.usage
+    comp_tok = getattr(usage, "completion_tokens", "?") if usage else "?"
+
+    if not content:
+        raise EmptyLLMResponseError(
+            f"{label} returned empty content (finish_reason={finish_reason}, "
+            f"completion_tokens={comp_tok}) — likely reasoning exhausted the output budget"
+        )
+    if finish_reason == "length":
+        raise EmptyLLMResponseError(
+            f"{label} hit output limit (finish_reason=length, completion_tokens={comp_tok})"
+        )
+    logger.info(
+        f"{label} ok: content={len(content)} chars, finish_reason={finish_reason}, "
+        f"completion_tokens={comp_tok}"
+    )
+    return content
+
+
 SYSTEM_PROMPT = """你是一个专业的笔记助手，擅长将视频转录内容整理成清晰、有条理且信息丰富的笔记。
 
 ⚠️ 语言要求（最高优先级，必须严格遵守）：
@@ -173,7 +212,7 @@ class LLMSummarizer:
                 result = fn(mc.client, mc.config.name)
                 self._last_model_name = mc.config.name
                 return result
-            except (APITimeoutError, APIConnectionError, RateLimitError, httpx.TimeoutException) as e:
+            except (APITimeoutError, APIConnectionError, RateLimitError, httpx.TimeoutException, EmptyLLMResponseError) as e:
                 last_err = e
                 logger.warning(f"{label} failed on {mc.config.name}: {type(e).__name__}: {e}")
             except APIStatusError as e:
@@ -200,32 +239,35 @@ class LLMSummarizer:
             inner = f"视频标题：{title}\n\n转录内容：\n{transcript}"
             user_content = self._wrap_user_content(inner)
             logger.info(f"Calling LLM (model={model}, text_len={len(transcript)})")
+            kwargs = dict(temperature=0.3)
+            if _is_reasoning_model(model):
+                kwargs["reasoning_effort"] = "low"
             response = client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": self.system_prompt},
                     {"role": "user", "content": user_content},
                 ],
-                max_tokens=4096,
-                temperature=0.3,
+                **kwargs,
             )
-            result = response.choices[0].message.content
-            logger.info(f"LLM summary generated ({len(result)} chars)")
-            return result
+            return _extract_content(response, "summarize")
 
         return self._call_with_fallback(_fn, "summarize")
 
-    def _call_llm(self, system_prompt: str, user_content: str):
+    def _call_llm(self, system_prompt: str, user_content: str) -> str:
         def _fn(client, model):
-            return client.chat.completions.create(
+            kwargs = dict(temperature=0.3)
+            if _is_reasoning_model(model):
+                kwargs["reasoning_effort"] = "low"
+            response = client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_content},
                 ],
-                max_tokens=4096,
-                temperature=0.3,
+                **kwargs,
             )
+            return _extract_content(response, "refine")
 
         return self._call_with_fallback(_fn, "refine")
 
@@ -246,8 +288,7 @@ class LLMSummarizer:
             )
             user_content = self._wrap_user_content(inner)
 
-            response = self._call_llm(self.refine_prompt, user_content)
-            running_summary = response.choices[0].message.content
+            running_summary = self._call_llm(self.refine_prompt, user_content)
             logger.info(f"Refined with chunk {i}/{len(refine_chunks)}, summary now {len(running_summary)} chars")
 
         logger.info(f"Final summary generated ({len(running_summary)} chars)")
