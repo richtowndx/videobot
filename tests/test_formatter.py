@@ -4,7 +4,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import os
-from bot.formatter import build_markdown, save_temp_markdown
+from bot.formatter import build_markdown, save_temp_markdown, build_transcript_markdown, collect_deliverables
 
 
 def test_build_markdown():
@@ -47,9 +47,50 @@ def test_save_temp_markdown_sanitizes_filename():
     os.rmdir(os.path.dirname(path))
 
 
+def test_save_temp_markdown_custom_suffix():
+    path = save_temp_markdown("My Video", "# 内容", suffix=".mp3")
+    assert path.endswith(".mp3.md")
+    assert "My Video" in os.path.basename(path)
+    os.remove(path)
+    os.rmdir(os.path.dirname(path))
+
+
+def test_build_transcript_markdown():
+    result = build_transcript_markdown("测试视频", "https://example.com/v/1", "纠错后的正文")
+    assert "# 测试视频" in result
+    assert "https://example.com/v/1" in result
+    assert "---" in result
+    assert "纠错后的正文" in result
+
+
+def test_collect_deliverables_with_and_without_mp3():
+    import tempfile
+    from pathlib import Path
+    notes_dir = Path(tempfile.mkdtemp(prefix="test_notes_"))
+    try:
+        # 无 .mp3.md -> 仅总结
+        items = collect_deliverables("T", "youtube", "https://u", "正文", None, "id1", notes_dir)
+        assert len(items) == 1
+        assert items[0][0] == "_summary"
+
+        # 有 .mp3.md -> 两份
+        (notes_dir / "id1.mp3.md").write_text("# T\n\n> 来源：https://u\n\n---\n\n正文", encoding="utf-8")
+        items = collect_deliverables("T", "youtube", "https://u", "正文", None, "id1", notes_dir)
+        assert len(items) == 2
+        assert items[0][0] == "_summary"
+        assert items[1][0] == ".mp3"
+        assert "正文" in items[1][1]
+    finally:
+        import shutil
+        shutil.rmtree(notes_dir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     test_build_markdown()
     test_build_markdown_with_special_chars()
     test_save_temp_markdown()
     test_save_temp_markdown_sanitizes_filename()
+    test_save_temp_markdown_custom_suffix()
+    test_build_transcript_markdown()
+    test_collect_deliverables_with_and_without_mp3()
     print("All formatter tests passed!")
