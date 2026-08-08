@@ -12,7 +12,7 @@ from config import BotConfig
 from core.url_parser import extract_urls, parse_platform
 from core.task_manager import TaskManager, TaskState
 from core.pipeline import Pipeline
-from bot.formatter import build_markdown, save_temp_markdown
+from bot.formatter import save_temp_markdown, collect_deliverables
 from uploaders import UploaderManager
 
 logger = logging.getLogger(__name__)
@@ -114,7 +114,7 @@ async def _process_single_url(
             # Load model_name from status.json for complete header
             full_task = task_manager.get_task(task.task_id)
             model_name = full_task.model_name if full_task else None
-            await _send_note(message, task.title or "video", task.platform, url, cached, model_name)
+            await _send_note(message, task.title or "video", task.platform, url, cached, model_name, task_id=task.task_id)
             return True, ""
 
     prefix = f"[{index}/{total}] " if total > 1 else ""
@@ -132,7 +132,7 @@ async def _process_single_url(
             )
 
             if result:
-                await _send_note(message, result.title, platform, url, result.content, result.model_name)
+                await _send_note(message, result.title, platform, url, result.content, result.model_name, task_id=task.task_id)
                 return True, ""
             else:
                 last_error = task.error or "Pipeline returned no result"
@@ -175,42 +175,48 @@ async def handle_message(message: types.Message):
     await _queue.put((message, urls, status_msg))
 
 
-async def _send_note(message: types.Message, title: str, platform: str, url: str, content: str, model_name: Optional[str] = None):
-    full_content = build_markdown(title, platform, url, content, model_name)
-    file_path = save_temp_markdown(title, full_content)
+async def _send_note(message: types.Message, title: str, platform: str, url: str, content: str, model_name: Optional[str] = None, task_id: Optional[str] = None):
+    """推送总结笔记；若 notes/{task_id}.mp3.md 存在则一并推送纠错稿。"""
+    deliverables = collect_deliverables(
+        title, platform, url, content, model_name, task_id, pipeline.data_config.NOTES_DIR
+    )
 
-    try:
-        # Wire telegram uploader to send document via this message
-        tg = uploader_manager.get_telegram_uploader()
-        if tg:
-            async def _send(title_, fp):
-                doc = types.FSInputFile(fp, filename=f"{title_[:50]}_summary.md")
-                await message.answer_document(doc, caption=f"Summary: {title_}", parse_mode=None)
-            tg.set_sender(_send)
+    # Telegram 发送器：用实际文件名，对总结/纠错稿通用
+    tg = uploader_manager.get_telegram_uploader()
+    if tg:
+        async def _send(title_, fp):
+            doc = types.FSInputFile(fp, filename=os.path.basename(fp))
+            await message.answer_document(doc, caption=f"{title_}", parse_mode=None)
+        tg.set_sender(_send)
 
-        # Run all uploaders in configured order
-        results = await uploader_manager.upload(file_path, title)
-
-        # Build status report
-        success_names = [r.uploader for r in results if r.success]
-        failed_items = [f"  - {r.uploader}: {r.message}" for r in results if not r.success and r.message != "not enabled"]
-        skipped_names = [r.uploader for r in results if not r.success and r.message == "not enabled"]
-
-        parts = []
-        if success_names:
-            parts.append(f"Uploaded via: {', '.join(success_names)}")
-        if skipped_names:
-            parts.append(f"Skipped (disabled): {', '.join(skipped_names)}")
-        if failed_items:
-            parts.append("Failed:\n" + "\n".join(failed_items))
-
-        if failed_items:
-            await message.answer("\n".join(parts))
-        elif skipped_names and not success_names:
-            await message.answer("No uploaders available. " + "\n".join(parts))
-    finally:
+    success_names, failed_items, skipped_names = [], [], []
+    for suffix, deliverable_content in deliverables:
+        file_path = save_temp_markdown(title, deliverable_content, suffix=suffix)
         try:
-            os.remove(file_path)
-            os.rmdir(os.path.dirname(file_path))
-        except OSError:
-            pass
+            results = await uploader_manager.upload(file_path, title)
+            for r in results:
+                if r.success:
+                    success_names.append(f"{r.uploader}({suffix})")
+                elif r.message == "not enabled":
+                    skipped_names.append(r.uploader)
+                else:
+                    failed_items.append(f"  - {r.uploader}({suffix}): {r.message}")
+        finally:
+            try:
+                os.remove(file_path)
+                os.rmdir(os.path.dirname(file_path))
+            except OSError:
+                pass
+
+    parts = []
+    if success_names:
+        parts.append(f"Uploaded via: {', '.join(success_names)}")
+    if skipped_names:
+        parts.append(f"Skipped (disabled): {', '.join(skipped_names)}")
+    if failed_items:
+        parts.append("Failed:\n" + "\n".join(failed_items))
+
+    if failed_items:
+        await message.answer("\n".join(parts))
+    elif skipped_names and not success_names:
+        await message.answer("No uploaders available. " + "\n".join(parts))
