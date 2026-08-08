@@ -214,6 +214,11 @@ class Pipeline:
                     corrected_text = None
             else:
                 corrected_text = self.task_manager.load_corrected(task)
+                mp3_md_path = self.data_config.NOTES_DIR / f"{task.task_id}.mp3.md"
+                if not mp3_md_path.exists():
+                    from bot.formatter import build_transcript_markdown
+                    mp3_md_path.write_text(build_transcript_markdown(task.title or "video", url, corrected_text), encoding="utf-8")
+                    logger.info(f"Re-created missing corrected transcript -> {mp3_md_path}")
 
         # Step 6: Summarize
         self.task_manager.update_state(task, TaskState.SUMMARIZING)

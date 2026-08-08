@@ -453,6 +453,49 @@ def test_subtitle_path_skips_correction():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ── Test 8: Resume recreates missing .mp3.md ─────────────────────────────────
+
+def test_resume_recreates_missing_mp3md():
+    """resume 时若 corrected.json 存在但 .mp3.md 缺失（落盘缝隙），应重新补写交付物。"""
+    tmp = tempfile.mkdtemp(prefix="test_resume_mp3_")
+    _setup(tmp)
+    try:
+        from config import DataConfig
+        url = BILIBILI_URL
+        task_manager = TaskManager()
+        pipeline = Pipeline()
+        task, _ = task_manager.get_or_create(url, "bilibili")
+
+        # 构造 resume 状态：转录与纠错已完成（corrected.json 存在），但 .mp3.md 缺失
+        task_manager.save_transcript(task, "RAW TRANSCRIPT")
+        task_manager.save_corrected(task, "CORRECTED BODY")
+
+        mock_transcriber = mock.MagicMock()  # has_transcript 为真 → 不会被调用
+        pipeline._transcriber = mock_transcriber
+
+        mock_summarizer = mock.MagicMock()
+        mock_summarizer.summarize.return_value = "# Summary"
+        pipeline._summarizer = mock_summarizer
+
+        mp3 = DataConfig.NOTES_DIR / f"{task.task_id}.mp3.md"
+        assert not mp3.exists(), "前置：.mp3.md 尚不存在"
+
+        with mock.patch("core.pipeline.get_downloader", return_value=_mock_downloader()):
+            result = pipeline.process(url, task)
+
+        assert result is not None
+        assert task.state == TaskState.COMPLETED
+        mock_transcriber.transcript.assert_not_called()
+        mock_summarizer.correct.assert_not_called()
+        mock_summarizer.summarize.assert_called_once()
+        assert mock_summarizer.summarize.call_args.args[1] == "CORRECTED BODY"
+        assert mp3.exists(), "resume 后 .mp3.md 应被补写"
+        assert "CORRECTED BODY" in mp3.read_text(encoding="utf-8")
+        print("test_resume_recreates_missing_mp3md PASSED\n")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ── Main runner ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -463,4 +506,5 @@ if __name__ == "__main__":
     test_correction_failure_falls_back_to_raw()
     test_correction_writes_mp3md_and_feeds_summary()
     test_subtitle_path_skips_correction()
+    test_resume_recreates_missing_mp3md()
     print("All pipeline resume tests passed!")
