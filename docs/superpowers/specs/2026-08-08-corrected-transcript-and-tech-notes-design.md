@@ -66,16 +66,12 @@ summarize(读 corrected)
 
 ### 3.1 分块策略
 
-复用 `summarizer/llm.py` 现有的 `_split_chunks` 与 `_calc_chunk_char_limit` 工具，但做两处调整：
+复用 `summarizer/llm.py` 现有的 `_split_chunks` 与 `_calc_chunk_char_limit(MAX_CONTEXT_TOKENS)`，仅做一处调整：
 
 - **关闭 overlap**：纠错是无损拼接，overlap 会产生重复文本。纠错分块 `overlap=0`。
-- **块大小由输出 token 上限反推**：纠错输出 ≈ 输入长度（只改错不压缩），而模型的**输出 token 上限**（通常 4k–8k）比上下文窗口更紧。因此纠错块要比总结块更小。
+- **块大小复用上下文窗口**：直接采用 `_calc_chunk_char_limit(MAX_CONTEXT_TOKENS)` 算出的字符上限（≈37k 字符），与总结分块同源、同上限。`max_context_tokens` 是唯一的块大小依据。
 
-实现：
-- 新增常量 `CORRECTION_MAX_OUTPUT_TOKENS`（默认 8192，取所配置模型较保守的输出上限）。
-- 纠错单块字符上限 = `int(CORRECTION_MAX_OUTPUT_TOKENS / CHARS_PER_TOKEN)` ≈ 12k 字符，并保证 `块输入 + 块输出 < MAX_CONTEXT_TOKENS`（对 64k 上下文成立）。
-- `max_context_tokens`（配置项）作为不可超出的**上限**复用；实际块大小由输出上限决定。
-- 纠错调用 LLM 时 `max_tokens` 设为 `CORRECTION_MAX_OUTPUT_TOKENS`。
+**不限定输出长度**：纠错调用 LLM 时**不传 `max_tokens`**——请求不限定上下文/输出长度，让模型按自身能力输出完整纠错结果。这与项目既有约定一致（总结/refine 调用也已移除 `max_tokens`）。
 
 **拼接**：各块纠错后按原始顺序直接拼接，不做 refine 合并。
 
@@ -95,7 +91,7 @@ summarize(读 corrected)
 ### 3.3 失败与降级
 
 - **纠错失败**（所有模型都报错）：降级为总结吃原始 `transcript.json`，不阻断整条流水线；不产出 `.mp3.md`；`status.json` 记录 `correction_failed=true`，日志告警。
-- **截断防护**：若某块输出长度 < 输入的 50%（启发式），记 warning 视为可能截断；不自动重试（避免成本爆炸，YAGNI）。
+- **截断/空响应**：复用 `_extract_content` 的既有机制——响应 `finish_reason=length`（输出被截断）或 content 为空时抛 `EmptyLLMResponseError`，由 `_call_with_fallback` 自动切换下一个模型重试；全部模型都失败则触发上一条的降级。不另外加手动启发式。
 
 ---
 
@@ -222,6 +218,6 @@ LLMSummarizer 新增 `correct(text) -> str` 方法，封装分块纠错 + 拼接
 
 ## 10. 风险
 
-- **模型输出 token 上限未知**：`step-3.7-flash` / `gemma4:e2b` 的实际最大输出 token 需在实现时验证；`CORRECTION_MAX_OUTPUT_TOKENS=8192` 为保守默认，若模型支持更大可上调以减少分块次数。
+- **模型实际输出能力**：请求不传 `max_tokens`，由 `_extract_content` 在 `finish_reason=length`/空 content 时触发模型回退；若所有配置模型对长纠错块都频繁截断，可在实现时把纠错块调小（如复用 `refine_chunk_char_limit`），无需引入新的输出上限常量。
 - **纠错块边界**：句子被切断时可能影响个别纠错质量；`_split_chunks` 已优先在换行处切分，影响可控。
 - **老任务兼容**：功能上线前的已完成任务无 `.mp3.md`，推送时按"只推总结"处理，不报错。

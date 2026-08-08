@@ -16,7 +16,7 @@
 
 **修改：**
 - `core/task_manager.py` — 新增 `corrected_file` 属性、`has/save/load_corrected`、`correction_failed` 字段（含向后兼容加载）、更新 `can_resume_from_summarization` 语义、`update_state` 支持 `correction_failed`。
-- `summarizer/llm.py` — 新增 `CORRECTION_SYSTEM_PROMPT`、`CORRECTION_MAX_OUTPUT_TOKENS`、`correct()` 方法；替换 `SYSTEM_PROMPT`/`REFINE_SYSTEM_PROMPT` 为技术知识点四字段 + 软兜底版。
+- `summarizer/llm.py` — 新增 `CORRECTION_SYSTEM_PROMPT`、`correct()` 方法；替换 `SYSTEM_PROMPT`/`REFINE_SYSTEM_PROMPT` 为技术知识点四字段 + 软兜底版。
 - `bot/formatter.py` — `save_temp_markdown` 增加 `suffix` 参数；新增 `build_transcript_markdown`、`collect_deliverables`。
 - `core/pipeline.py` — 在转录与总结之间插入纠错步骤，写 `notes/{id}.mp3.md`，纠错失败降级，`text_content` 优先级改为 `corrected > subtitle > raw`。
 - `bot/handler.py` — `_send_note` 改为多文件推送，读取 `notes/{id}.mp3.md`。
@@ -218,7 +218,11 @@ def _make_summarizer(mock_client):
 
 def _resp(content):
     m = MagicMock()
-    m.choices = [MagicMock(message=MagicMock(content=content))]
+    choice = MagicMock()
+    choice.message.content = content
+    choice.finish_reason = "stop"
+    m.choices = [choice]
+    m.usage = None
     return m
 
 
@@ -240,13 +244,13 @@ def test_correct_uses_correction_system_prompt():
     assert call.kwargs["messages"][0]["content"] == CORRECTION_SYSTEM_PROMPT
 
 
-def test_correct_max_tokens_is_output_limit():
+def test_correct_does_not_set_max_tokens():
+    """请求不限定上下文长度：纠错调用不传 max_tokens。"""
     mc = MagicMock()
     mc.chat.completions.create.return_value = _resp("x")
     s = _make_summarizer(mc)
     s.correct("text")
-    from summarizer.llm import CORRECTION_MAX_OUTPUT_TOKENS
-    assert mc.chat.completions.create.call_args.kwargs["max_tokens"] == CORRECTION_MAX_OUTPUT_TOKENS
+    assert "max_tokens" not in mc.chat.completions.create.call_args.kwargs
 
 
 def test_correct_empty_returns_empty_without_call():
@@ -281,7 +285,7 @@ def test_correct_no_overlap_reconstructs_original():
 if __name__ == "__main__":
     test_correct_single_chunk_returns_content()
     test_correct_uses_correction_system_prompt()
-    test_correct_max_tokens_is_output_limit()
+    test_correct_does_not_set_max_tokens()
     test_correct_empty_returns_empty_without_call()
     test_correct_multi_chunk_concatenates_in_order()
     test_correct_no_overlap_reconstructs_original()
@@ -293,17 +297,9 @@ if __name__ == "__main__":
 运行：`python -m pytest tests/test_corrector.py -v`
 预期：FAIL，报错 `ImportError: cannot import name 'CORRECTION_SYSTEM_PROMPT'` / `AttributeError: 'LLMSummarizer' object has no attribute 'correct'`。
 
-- [ ] **步骤 3：实现纠错常量、提示词与方法**
+- [ ] **步骤 3：实现纠错提示词与方法**
 
-在 `summarizer/llm.py` 顶部常量区（`REFINE_EXTRA_RESERVED` 之后）新增：
-
-```python
-# 纠错：输出 ≈ 输入长度（只改错不压缩），块大小受模型"输出 token 上限"约束（而非上下文窗口）。
-# 保守取 8192；若所配模型支持更大输出可上调以减少分块次数。
-CORRECTION_MAX_OUTPUT_TOKENS = 8192
-```
-
-在 `REFINE_SYSTEM_PROMPT` 定义之后新增纠错提示词：
+在 `REFINE_SYSTEM_PROMPT` 定义之后新增纠错提示词（**不新增任何 max_tokens / 输出上限常量**——请求不限定上下文长度；截断与空响应交给既有 `_extract_content` + `_call_with_fallback` 模型回退处理）：
 
 ```python
 CORRECTION_SYSTEM_PROMPT = """你是一个专业的文字校对助手。输入是一段视频语音转文字（ASR）的原始结果，可能包含错别字、同音字错误、标点缺失、专有名词错误等问题。
@@ -319,10 +315,11 @@ CORRECTION_SYSTEM_PROMPT = """你是一个专业的文字校对助手。输入�
 """
 ```
 
-在 `LLMSummarizer.__init__` 中（`self.refine_chunk_char_limit = ...` 那一行之后）新增纠错块上限：
+在 `LLMSummarizer.__init__` 中（`self.refine_chunk_char_limit = ...` 那一行之后）新增纠错块上限（**复用上下文窗口，与总结同源**，仅 overlap 不同）：
 
 ```python
-        self.correction_chunk_char_limit = int(CORRECTION_MAX_OUTPUT_TOKENS / CHARS_PER_TOKEN)
+        # 纠错块大小复用上下文窗口（与总结同源），仅 overlap 不同
+        self.correction_chunk_char_limit = self.chunk_char_limit
         logger.info(f"Correction chunk size: {self.correction_chunk_char_limit} chars")
 ```
 
@@ -331,7 +328,8 @@ CORRECTION_SYSTEM_PROMPT = """你是一个专业的文字校对助手。输入�
 ```python
     def correct(self, text: str) -> str:
         """对 ASR 原始转写做纠错。无损：保留全部内容，仅修正错误。
-        按"输出 token 上限"分块、overlap=0，逐块纠错后按顺序拼接。"""
+        复用上下文窗口分块、overlap=0，逐块纠错后按顺序拼接。
+        截断/空响应由 _extract_content 抛 EmptyLLMResponseError，经 _call_with_fallback 自动切模型。"""
         if not text:
             return text
 
@@ -341,11 +339,6 @@ CORRECTION_SYSTEM_PROMPT = """你是一个专业的文字校对助手。输入�
         parts = []
         for i, chunk in enumerate(chunks, start=1):
             corrected = self._correct_single(chunk)
-            if len(chunk) > 1000 and len(corrected) < len(chunk) * 0.5:
-                logger.warning(
-                    f"Correction chunk {i}/{len(chunks)} output {len(corrected)} chars "
-                    f"< 50% of input {len(chunk)} chars, possible truncation"
-                )
             parts.append(corrected)
             logger.info(f"Corrected chunk {i}/{len(chunks)} ({len(corrected)} chars)")
 
@@ -354,16 +347,18 @@ CORRECTION_SYSTEM_PROMPT = """你是一个专业的文字校对助手。输入�
     def _correct_single(self, chunk: str) -> str:
         def _fn(client, model):
             user_content = f"原始转写文本：\n{chunk}"
+            kwargs = dict(temperature=0.1)
+            if _is_reasoning_model(model):
+                kwargs["reasoning_effort"] = "low"
             response = client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": CORRECTION_SYSTEM_PROMPT},
                     {"role": "user", "content": user_content},
                 ],
-                max_tokens=CORRECTION_MAX_OUTPUT_TOKENS,
-                temperature=0.1,
+                **kwargs,
             )
-            return response.choices[0].message.content
+            return _extract_content(response, "correct")
 
         return self._call_with_fallback(_fn, "correct")
 ```
@@ -379,7 +374,7 @@ CORRECTION_SYSTEM_PROMPT = """你是一个专业的文字校对助手。输入�
 
 ```bash
 git add summarizer/llm.py tests/test_corrector.py
-git commit -m "feat: LLMSummarizer 新增无损纠错 correct()，按输出 token 上限分块"
+git commit -m "feat: LLMSummarizer 新增无损纠错 correct()，复用上下文窗口分块、不传 max_tokens"
 ```
 
 ---
@@ -971,7 +966,7 @@ git commit -m "feat: handler 一并推送总结笔记与纠错转写稿"
 
 - [ ] **步骤 5：端到端冒烟（可选，需网络/模型）**
 
-用一个真实的 Bilibili/YouTube 链接跑 `python main.py`，确认 Telegram 收到**两份**文档：`{title}_summary.md`（技术知识点结构）与 `{title}.mp3.md`（纠错转写稿）。若模型输出 token 上限不足导致纠错截断，调整 `summarizer/llm.py` 的 `CORRECTION_MAX_OUTPUT_TOKENS`。
+用一个真实的 Bilibili/YouTube 链接跑 `python main.py`，确认 Telegram 收到**两份**文档：`{title}_summary.md`（技术知识点结构）与 `{title}.mp3.md`（纠错转写稿）。若所配模型对长纠错块频繁截断（日志可见 `finish_reason=length`），可把 `correction_chunk_char_limit` 调小（如复用 `refine_chunk_char_limit`），无需引入输出上限常量。
 
 ---
 
@@ -981,7 +976,7 @@ git commit -m "feat: handler 一并推送总结笔记与纠错转写稿"
 - §2 数据流（转录→纠错→总结）→ 任务 5 ✓
 - §2.2 字幕路径不纠错 → 任务 5 `test_subtitle_path_skips_correction` ✓
 - §2.3 断点续传三级跳 → 任务 1（`can_resume_from_summarization`）+ 任务 5（pipeline `has_corrected` 分支）✓
-- §3.1 分块（输出 token 上限反推、overlap=0）→ 任务 2 ✓
+- §3.1 分块（复用上下文窗口、overlap=0、不传 max_tokens）→ 任务 2 ✓
 - §3.2 纠错提示词 → 任务 2 ✓
 - §3.3 失败降级 + 截断告警 → 任务 5（降级测试）+ 任务 2（截断 warning）✓
 - §4.1 存储与命名（`corrected.json` / `notes/{id}.mp3.md` / `{title}.mp3.md`）→ 任务 1、4、5、6 ✓
@@ -995,12 +990,12 @@ git commit -m "feat: handler 一并推送总结笔记与纠错转写稿"
 
 无遗漏。
 
-**2. 占位符扫描：** 全部步骤含实际代码；无 TODO/待定/"类似任务 N"。`CORRECTION_MAX_OUTPUT_TOKENS=8192` 为带理由的保守默认（非占位）。
+**2. 占位符扫描：** 全部步骤含实际代码；无 TODO/待定/"类似任务 N"。
 
 **3. 类型/命名一致性：**
 - `Task.corrected_file` / `has_corrected` / `save_corrected` / `load_corrected`：任务 1 定义，任务 5 使用——一致 ✓
 - `correction_failed` 字段：任务 1 定义（含 `update_state` kwarg + `_load` setdefault），任务 5 写入，降级测试断言——一致 ✓
-- `LLMSummarizer.correct()` / `_correct_single()` / `correction_chunk_char_limit` / `CORRECTION_SYSTEM_PROMPT` / `CORRECTION_MAX_OUTPUT_TOKENS`：任务 2 定义，任务 5 调用 `self.summarizer.correct(...)`——一致 ✓
+- `LLMSummarizer.correct()` / `_correct_single()` / `correction_chunk_char_limit` / `CORRECTION_SYSTEM_PROMPT`：任务 2 定义，任务 5 调用 `self.summarizer.correct(...)`——一致 ✓
 - `build_transcript_markdown(title, url, text)`：任务 4 定义，任务 5 导入调用 `build_transcript_markdown(task.title or "video", url, corrected_text)`——签名一致 ✓
 - `save_temp_markdown(title, content, suffix=...)`：任务 4 定义（默认 `_summary` 保持向后兼容），任务 6 调用 `suffix=suffix`——一致 ✓
 - `collect_deliverables(title, platform, url, summary, model_name, task_id, notes_dir)`：任务 4 定义，任务 6 调用参数顺序一致 ✓
