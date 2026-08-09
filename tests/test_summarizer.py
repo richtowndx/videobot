@@ -6,6 +6,25 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from unittest.mock import patch, MagicMock
 
 
+def _stream(content, finish_reason="stop", comp_tokens=None):
+    chunks = []
+    head = MagicMock()
+    head_choice = MagicMock()
+    head_choice.delta.content = content
+    head_choice.finish_reason = None
+    head.choices = [head_choice]
+    head.usage = None
+    chunks.append(head)
+    tail = MagicMock()
+    tail_choice = MagicMock()
+    tail_choice.delta.content = None
+    tail_choice.finish_reason = finish_reason
+    tail.choices = [tail_choice]
+    tail.usage = MagicMock(completion_tokens=comp_tokens) if comp_tokens is not None else None
+    chunks.append(tail)
+    return chunks
+
+
 @patch("summarizer.llm.OpenAI")
 @patch("summarizer.llm.AIConfig.load_models")
 def test_summarize(mock_load_models, mock_openai_cls):
@@ -13,11 +32,7 @@ def test_summarize(mock_load_models, mock_openai_cls):
     mock_load_models.return_value = [ModelConfig(name="test-model", url="http://test", key="test-key")]
 
     mock_client = MagicMock()
-    mock_choice = MagicMock()
-    mock_choice.message.content = "# Test Summary\n\nThis is a summary."
-    mock_response = MagicMock()
-    mock_response.choices = [mock_choice]
-    mock_client.chat.completions.create.return_value = mock_response
+    mock_client.chat.completions.create.return_value = _stream("# Test Summary\n\nThis is a summary.")
     mock_client.models.list.return_value = []
     mock_openai_cls.return_value = mock_client
 
@@ -41,11 +56,7 @@ def test_summarize_uses_config(mock_load_models, mock_openai_cls):
     mock_load_models.return_value = [ModelConfig(name="test-model", url="http://test", key="test-key")]
 
     mock_client = MagicMock()
-    mock_choice = MagicMock()
-    mock_choice.message.content = "Summary"
-    mock_response = MagicMock()
-    mock_response.choices = [mock_choice]
-    mock_client.chat.completions.create.return_value = mock_response
+    mock_client.chat.completions.create.return_value = _stream("Summary")
     mock_client.models.list.return_value = []
     mock_openai_cls.return_value = mock_client
 

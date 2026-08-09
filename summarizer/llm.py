@@ -24,31 +24,6 @@ def _is_reasoning_model(name: str) -> bool:
     return any(name.startswith(p) for p in _REASONING_MODEL_PREFIXES)
 
 
-def _extract_content(response, label: str) -> str:
-    """从响应中提取正文；空 content 或 finish_reason=length 视为失败（抛 EmptyLLMResponseError，
-    以便 _call_with_fallback 切换到下一个模型重试），并记录 finish_reason / token 用量。"""
-    choice = response.choices[0]
-    content = (choice.message.content or "").strip()
-    finish_reason = choice.finish_reason
-    usage = response.usage
-    comp_tok = getattr(usage, "completion_tokens", "?") if usage else "?"
-
-    if not content:
-        raise EmptyLLMResponseError(
-            f"{label} returned empty content (finish_reason={finish_reason}, "
-            f"completion_tokens={comp_tok}) — likely reasoning exhausted the output budget"
-        )
-    if finish_reason == "length":
-        raise EmptyLLMResponseError(
-            f"{label} hit output limit (finish_reason=length, completion_tokens={comp_tok})"
-        )
-    logger.info(
-        f"{label} ok: content={len(content)} chars, finish_reason={finish_reason}, "
-        f"completion_tokens={comp_tok}"
-    )
-    return content
-
-
 SYSTEM_PROMPT = """你是一个专业的技术笔记助手，默认采用「技术知识点梳理」模式整理视频转录内容。
 
 ⚠️ 语言要求（最高优先级，必须严格遵守）：
@@ -268,10 +243,50 @@ class LLMSummarizer:
 
         raise RuntimeError(f"All {len(self._models)} model(s) failed for {label}") from last_err
 
+    def _complete_stream(self, client, model, messages, *, temperature, reasoning, label) -> str:
+        """流式调用 LLM，拼接 content；空内容 / finish_reason=length 视为失败抛 EmptyLLMResponseError，
+        交由 _call_with_fallback 切换下一个模型。流式下 read timeout 为空闲超时，避免长输出的总时间超时。"""
+        kwargs = dict(temperature=temperature, stream=True,
+                      stream_options={"include_usage": True})
+        if reasoning:
+            kwargs["reasoning_effort"] = "low"
+        stream = client.chat.completions.create(model=model, messages=messages, **kwargs)
+
+        parts: list[str] = []
+        finish_reason = None
+        usage = None
+        for chunk in stream:
+            if getattr(chunk, "usage", None):
+                usage = chunk.usage
+            if chunk.choices:
+                delta = chunk.choices[0].delta
+                if delta and delta.content:
+                    parts.append(delta.content)
+                fr = chunk.choices[0].finish_reason
+                if fr:
+                    finish_reason = fr
+        content = "".join(parts).strip()
+        comp_tok = getattr(usage, "completion_tokens", "?") if usage else "?"
+
+        if not content:
+            raise EmptyLLMResponseError(
+                f"{label} returned empty content (finish_reason={finish_reason}, "
+                f"completion_tokens={comp_tok}) — likely reasoning exhausted the output budget"
+            )
+        if finish_reason == "length":
+            raise EmptyLLMResponseError(
+                f"{label} hit output limit (finish_reason=length, completion_tokens={comp_tok})"
+            )
+        logger.info(
+            f"{label} ok: content={len(content)} chars, finish_reason={finish_reason}, "
+            f"completion_tokens={comp_tok}"
+        )
+        return content
+
     def correct(self, text: str) -> str:
         """对 ASR 原始转写做纠错。无损：保留全部内容，仅修正错误。
         复用上下文窗口分块、overlap=0，逐块纠错后按顺序拼接。
-        截断/空响应由 _extract_content 抛 EmptyLLMResponseError，经 _call_with_fallback 自动切模型。"""
+        截断/空响应由 _complete_stream 抛 EmptyLLMResponseError，经 _call_with_fallback 自动切模型。"""
         if not text:
             return text
 
@@ -288,20 +303,14 @@ class LLMSummarizer:
 
     def _correct_single(self, chunk: str) -> str:
         def _fn(client, model):
-            user_content = f"原始转写文本：\n{chunk}"
-            kwargs = dict(temperature=0.1)
-            if _is_reasoning_model(model):
-                kwargs["reasoning_effort"] = "low"
-            response = client.chat.completions.create(
-                model=model,
+            return self._complete_stream(
+                client, model,
                 messages=[
                     {"role": "system", "content": CORRECTION_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_content},
+                    {"role": "user", "content": f"原始转写文本：\n{chunk}"},
                 ],
-                **kwargs,
+                temperature=0.1, reasoning=_is_reasoning_model(model), label="correct",
             )
-            return _extract_content(response, "correct")
-
         return self._call_with_fallback(_fn, "correct")
 
     def summarize(self, title: str, transcript: str) -> str:
@@ -322,36 +331,26 @@ class LLMSummarizer:
             inner = f"视频标题：{title}\n\n转录内容：\n{transcript}"
             user_content = self._wrap_user_content(inner)
             logger.info(f"Calling LLM (model={model}, text_len={len(transcript)})")
-            kwargs = dict(temperature=0.3)
-            if _is_reasoning_model(model):
-                kwargs["reasoning_effort"] = "low"
-            response = client.chat.completions.create(
-                model=model,
+            return self._complete_stream(
+                client, model,
                 messages=[
                     {"role": "system", "content": self.system_prompt},
                     {"role": "user", "content": user_content},
                 ],
-                **kwargs,
+                temperature=0.3, reasoning=_is_reasoning_model(model), label="summarize",
             )
-            return _extract_content(response, "summarize")
-
         return self._call_with_fallback(_fn, "summarize")
 
     def _call_llm(self, system_prompt: str, user_content: str) -> str:
         def _fn(client, model):
-            kwargs = dict(temperature=0.3)
-            if _is_reasoning_model(model):
-                kwargs["reasoning_effort"] = "low"
-            response = client.chat.completions.create(
-                model=model,
+            return self._complete_stream(
+                client, model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_content},
                 ],
-                **kwargs,
+                temperature=0.3, reasoning=_is_reasoning_model(model), label="refine",
             )
-            return _extract_content(response, "refine")
-
         return self._call_with_fallback(_fn, "refine")
 
     def _summarize_refine(self, title: str, chunks: list[str]) -> str:
