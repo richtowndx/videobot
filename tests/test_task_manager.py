@@ -136,8 +136,17 @@ def test_cleanup_task_files():
         task = mgr.create_task("abc123", "https://example.com", "youtube")
         task_dir = task.task_dir
         assert task_dir.exists()
+        # 写入中间文件，模拟下载后状态
+        (task_dir / "audio.mp3").write_bytes(b"fake audio")
+        mgr.save_transcript(task, "some transcript")
+        assert (task_dir / "audio.mp3").exists()
+        assert (task_dir / "transcript.json").exists()
         mgr.cleanup_task_files(task)
-        assert not task_dir.exists()
+        # cleanup 保留 status.json（重建 task_dir），但中间文件被清
+        assert task_dir.exists()
+        assert task.status_file.exists()
+        assert not (task_dir / "audio.mp3").exists()
+        assert not (task_dir / "transcript.json").exists()
     finally:
         teardown_temp_data(tmp)
 
