@@ -501,6 +501,48 @@ def test_resume_recreates_missing_mp3md():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ── Test 9: Correction sets CORRECTING state ────────────────────────────────────────
+
+def test_correction_sets_correcting_state():
+    """音频路径纠错时，update_state 应被以 CORRECTING 调用过。"""
+    tmp = tempfile.mkdtemp(prefix="test_corr_state_")
+    _setup(tmp)
+    try:
+        url = BILIBILI_URL
+        task_manager = TaskManager()
+        pipeline = Pipeline()
+        task, _ = task_manager.get_or_create(url, "bilibili")
+
+        pipeline._transcriber = mock.MagicMock()
+        pipeline._transcriber.transcript.return_value = "RAW TEXT"
+        pipeline._summarizer = mock.MagicMock()
+        pipeline._summarizer.correct.return_value = "CORRECTED"
+        pipeline._summarizer._last_model_name = "test-model"
+        pipeline._summarizer.summarize.return_value = "# Summary"
+
+        # Capture state transitions by monkey-patching the method
+        seen_states = []
+        original_update_state = pipeline.task_manager.update_state.__func__  # Get unbound method
+        
+        def patched_update_state(self_mgr, task_obj, state, **kwargs):
+            if isinstance(state, TaskState):
+                seen_states.append(state)
+            return original_update_state(self_mgr, task_obj, state, **kwargs)
+        
+        # Temporarily replace the method
+        import types
+        pipeline.task_manager.update_state = types.MethodType(patched_update_state, pipeline.task_manager)
+
+        with mock.patch("core.pipeline.get_downloader", return_value=_mock_downloader()):
+            result = pipeline.process(url, task)
+
+        assert result is not None
+        assert TaskState.CORRECTING in seen_states, f"期望经过 CORRECTING，实际：{seen_states}"
+        print("test_correction_sets_correcting_state PASSED\n")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ── Main runner ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -512,4 +554,5 @@ if __name__ == "__main__":
     test_correction_writes_mp3md_and_feeds_summary()
     test_subtitle_path_skips_correction()
     test_resume_recreates_missing_mp3md()
+    test_correction_sets_correcting_state()
     print("All pipeline resume tests passed!")

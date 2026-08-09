@@ -12,6 +12,7 @@ class TaskState(str, Enum):
     PENDING = "pending"
     DOWNLOADING = "downloading"
     TRANSCRIBING = "transcribing"
+    CORRECTING = "correcting"        # 新增：纠错
     SUMMARIZING = "summarizing"
     COMPLETED = "completed"
     FAILED = "failed"

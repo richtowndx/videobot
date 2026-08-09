@@ -121,21 +121,36 @@ class Pipeline:
             self.set_processing(False)
 
     def _do_process(self, url: str, task: Task, mem_start: float) -> Optional[PipelineResult]:
-        # Step 1: Check if already completed
+        # 已完成：返回缓存（任务 3 将由入口决策接管）
         cached = self.task_manager.get_cached_result(task.task_id)
         if cached:
             logger.info(f"Returning cached result for {task.task_id}")
             return PipelineResult(task_id=task.task_id, title=task.title or "video", content=cached)
 
-        # Reset failed task so pipeline can retry from last successful step
+        self._reset_if_failed(task)
+        downloader = get_downloader(task.platform)
+
+        self._ensure_title(task, downloader, url)
+        text = self._acquire_text(task, downloader, url)
+        if not text:
+            logger.error("No text content available for summarization")
+            self.task_manager.update_state(task, TaskState.FAILED, error="No text content")
+            return None
+
+        markdown, model_name = self._summarize(task, text)
+        self._finalize(task, markdown, model_name, mem_start)
+        return PipelineResult(task_id=task.task_id, title=task.title, content=markdown, model_name=model_name)
+
+    # ── 编排子函数 ──────────────────────────────────────────────────────────
+
+    def _reset_if_failed(self, task: Task):
         if task.state == TaskState.FAILED:
             logger.info(f"Retrying previously failed task {task.task_id}")
             task.error = None
             self.task_manager.update_state(task, TaskState.PENDING)
 
-        downloader = get_downloader(task.platform)
-
-        # Step 2: Extract video info for title
+    def _ensure_title(self, task: Task, downloader, url: str):
+        """任务 1：始终联网取标题（与原行为一致）。任务 3 改为按 audio_cached 跳过。"""
         try:
             info = downloader.extract_info(url)
             task.title = info.get("title", "Unknown Video")
@@ -143,112 +158,106 @@ class Pipeline:
             logger.warning(f"Failed to extract info: {e}")
             task.title = "Unknown Video"
 
-        # Step 3: Try subtitle extraction (fast path)
-        subtitle_text = None
-        if not self.task_manager.has_subtitle(task):
-            self.task_manager.update_state(task, TaskState.DOWNLOADING)
-            try:
-                subtitle_text = downloader.extract_subtitles(url)
-                if subtitle_text:
-                    self.task_manager.save_subtitle(task, subtitle_text)
-                    logger.info(f"Subtitles extracted ({len(subtitle_text)} chars)")
-            except Exception as e:
-                logger.warning(f"Subtitle extraction failed: {e}")
-        else:
-            subtitle_text = self.task_manager.load_subtitle(task)
+    def _acquire_text(self, task: Task, downloader, url: str) -> str:
+        """取总结用文本：字幕优先，否则音频转写 + 纠错。"""
+        subtitle = self._maybe_get_subtitle(task, downloader, url)
+        if subtitle:
+            return subtitle
+        self._ensure_audio(task, downloader, url)
+        transcript = self._transcribe(task)
+        if not transcript:
+            return ""
+        return self._correct(task, url, transcript) or transcript
 
-        # Step 4: Download audio if no subtitles
-        audio_text = None
-        corrected_text = None
-        if not subtitle_text:
-            if not self.task_manager.has_audio(task):
-                self.task_manager.update_state(task, TaskState.DOWNLOADING)
-                result = downloader.download_audio(url, str(task.task_dir))
-                task.title = result.title or task.title
-                logger.info(f"Audio downloaded: {result.file_path}")
-
-            # Step 5: Transcribe audio (Whisper model stays loaded)
-            if not self.task_manager.has_transcript(task):
-                self.task_manager.update_state(task, TaskState.TRANSCRIBING)
-                gc.collect()
-                mem_before = _mem_mb()
-                logger.info(f"[MEM] Before transcription [mem: {mem_before:.0f}MB]")
-                audio_path = str(task.audio_file)
-                audio_text = self.transcriber.transcript(audio_path)
-                mem_after = _mem_mb()
-                logger.info(f"[MEM] After transcription [mem: {mem_after:.0f}MB, delta: {mem_after-mem_before:.0f}MB]")
-                self.task_manager.save_transcript(task, audio_text)
-                logger.info(f"Transcription done ({len(audio_text)} chars)")
-                # Free transcription intermediates
-                del audio_text
-                audio_text = self.task_manager.load_transcript(task)
-                gc.collect()
-                _malloc_trim()
-                logger.info(f"[MEM] After GC+trim [mem: {_mem_mb():.0f}MB]")
-            else:
-                audio_text = self.task_manager.load_transcript(task)
-
-        # Step 5.5: Correct transcript (only when audio was transcribed, not subtitles)
-        if not subtitle_text and audio_text:
-            if not self.task_manager.has_corrected(task):
-                gc.collect()
-                mem_before_corr = _mem_mb()
-                logger.info(f"[MEM] Before correction [mem: {mem_before_corr:.0f}MB]")
-                try:
-                    corrected_text = self.summarizer.correct(audio_text)
-                    corr_model = self.summarizer._last_model_name
-                    self.task_manager.save_corrected(task, corrected_text, model_name=corr_model)
-                    from bot.formatter import build_transcript_markdown
-                    mp3_md = build_transcript_markdown(task.title or "video", url, corrected_text, model_name=corr_model)
-                    mp3_md_path = self.data_config.NOTES_DIR / f"{task.task_id}.mp3.md"
-                    mp3_md_path.write_text(mp3_md, encoding="utf-8")
-                    logger.info(f"Corrected transcript ({len(corrected_text)} chars) -> {mp3_md_path}")
-                    gc.collect()
-                    _malloc_trim()
-                    logger.info(f"[MEM] After correction+trim [mem: {_mem_mb():.0f}MB]")
-                except Exception as e:
-                    logger.warning(
-                        f"Transcript correction failed, falling back to raw transcript: {e}",
-                        exc_info=True,
-                    )
-                    self.task_manager.update_state(task, task.state, correction_failed=True)
-                    corrected_text = None
-            else:
-                corrected_text = self.task_manager.load_corrected(task)
-                corr_model = self.task_manager.load_corrected_model(task)
-                mp3_md_path = self.data_config.NOTES_DIR / f"{task.task_id}.mp3.md"
-                if not mp3_md_path.exists():
-                    from bot.formatter import build_transcript_markdown
-                    mp3_md_path.write_text(build_transcript_markdown(task.title or "video", url, corrected_text, model_name=corr_model), encoding="utf-8")
-                    logger.info(f"Re-created missing corrected transcript -> {mp3_md_path}")
-
-        # Step 6: Summarize
-        self.task_manager.update_state(task, TaskState.SUMMARIZING)
-        mem_before_summary = _mem_mb()
-        logger.info(f"[MEM] Before summarization [mem: {mem_before_summary:.0f}MB]")
-        text_content = corrected_text or subtitle_text or audio_text or ""
-        if not text_content:
-            logger.error("No text content available for summarization")
-            self.task_manager.update_state(task, TaskState.FAILED, error="No text content")
+    def _maybe_get_subtitle(self, task: Task, downloader, url: str) -> Optional[str]:
+        if self.task_manager.has_subtitle(task):
+            return self.task_manager.load_subtitle(task)
+        self.task_manager.update_state(task, TaskState.DOWNLOADING)
+        try:
+            subtitle = downloader.extract_subtitles(url)
+            if subtitle:
+                self.task_manager.save_subtitle(task, subtitle)
+                logger.info(f"Subtitles extracted ({len(subtitle)} chars)")
+            return subtitle
+        except Exception as e:
+            logger.warning(f"Subtitle extraction failed: {e}")
             return None
 
-        markdown = self.summarizer.summarize(task.title, text_content)
-        # Free source text immediately
-        del text_content, subtitle_text, audio_text
-        mem_after_summary = _mem_mb()
-        logger.info(f"[MEM] After summarization [mem: {mem_after_summary:.0f}MB, delta: {mem_after_summary-mem_before_summary:.0f}MB]")
+    def _ensure_audio(self, task: Task, downloader, url: str):
+        """任务 1：仍下载到 task 目录。任务 2 改为下载到 AUDIO_DIR。"""
+        if self.task_manager.has_audio(task):
+            return
+        self.task_manager.update_state(task, TaskState.DOWNLOADING)
+        result = downloader.download_audio(url, str(task.task_dir))
+        task.title = result.title or task.title
+        logger.info(f"Audio downloaded: {result.file_path}")
 
-        # Step 7: Save and cleanup task files
-        model_name = self.summarizer._last_model_name
-        task.model_name = model_name if isinstance(model_name, str) else None
+    def _transcribe(self, task: Task) -> str:
+        if self.task_manager.has_transcript(task):
+            return self.task_manager.load_transcript(task)
+        self.task_manager.update_state(task, TaskState.TRANSCRIBING)
+        self._log_mem("Before transcription")
+        audio_text = self.transcriber.transcript(str(task.audio_file))
+        self.task_manager.save_transcript(task, audio_text)
+        logger.info(f"Transcription done ({len(audio_text)} chars)")
+        self._reclaim_mem("After transcription (GC+trim)")
+        return audio_text
+
+    def _correct(self, task: Task, url: str, transcript: str) -> Optional[str]:
+        if self.task_manager.has_corrected(task):
+            corrected = self.task_manager.load_corrected(task)
+            model = self.task_manager.load_corrected_model(task)
+            self._ensure_mp3_md(task, url, corrected, model)
+            return corrected
+        self.task_manager.update_state(task, TaskState.CORRECTING)
+        self._reclaim_mem("Before correction")
+        try:
+            corrected = self.summarizer.correct(transcript)
+            model = self.summarizer._last_model_name
+            self.task_manager.save_corrected(task, corrected, model_name=model)
+            self._write_mp3_md(task, url, corrected, model)
+            logger.info(f"Corrected transcript ({len(corrected)} chars)")
+            self._reclaim_mem("After correction (GC+trim)")
+            return corrected
+        except Exception as e:
+            logger.warning(f"Transcript correction failed, falling back to raw transcript: {e}", exc_info=True)
+            self.task_manager.update_state(task, task.state, correction_failed=True)
+            return None
+
+    def _write_mp3_md(self, task: Task, url: str, text: str, model):
+        from bot.formatter import build_transcript_markdown
+        md = build_transcript_markdown(task.title or "video", url, text, model_name=model)
+        path = self.data_config.NOTES_DIR / f"{task.task_id}.mp3.md"
+        path.write_text(md, encoding="utf-8")
+        logger.info(f"Corrected transcript -> {path}")
+
+    def _ensure_mp3_md(self, task: Task, url: str, text: str, model):
+        path = self.data_config.NOTES_DIR / f"{task.task_id}.mp3.md"
+        if not path.exists():
+            self._write_mp3_md(task, url, text, model)
+
+    def _summarize(self, task: Task, text: str):
+        self.task_manager.update_state(task, TaskState.SUMMARIZING)
+        self._log_mem("Before summarization")
+        markdown = self.summarizer.summarize(task.title, text)
+        model = self.summarizer._last_model_name
+        self._log_mem("After summarization")
+        return markdown, (model if isinstance(model, str) else None)
+
+    def _finalize(self, task: Task, markdown: str, model_name, mem_start: float):
+        task.model_name = model_name
         self.task_manager.save_note(task, markdown)
         self.task_manager.update_state(task, TaskState.COMPLETED)
         self.task_manager.cleanup_task_files(task)
-
-        # Aggressive cleanup between tasks
         gc.collect()
         _malloc_trim()
-
         mem_end = _mem_mb()
         logger.info(f"[MEM] Pipeline completed for {task.task_id} [mem: {mem_end:.0f}MB, delta: {mem_end-mem_start:.0f}MB]")
-        return PipelineResult(task_id=task.task_id, title=task.title, content=markdown, model_name=self.summarizer._last_model_name)
+
+    def _log_mem(self, label: str):
+        logger.info(f"[MEM] {label} [mem: {_mem_mb():.0f}MB]")
+
+    def _reclaim_mem(self, label: str):
+        gc.collect()
+        _malloc_trim()
+        logger.info(f"[MEM] {label} [mem: {_mem_mb():.0f}MB]")
