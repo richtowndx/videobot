@@ -185,6 +185,7 @@ class Pipeline:
             return None
 
     def _ensure_audio(self, task: Task, downloader, url: str):
+        """确保音频存在：已缓存则跳过，否则下载到 AUDIO_DIR 并写 meta.json。"""
         if self.task_manager.has_audio(task):
             return
         self.task_manager.update_state(task, TaskState.DOWNLOADING)
