@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 NOTES_MAX_AGE_DAYS = 30
 TASKS_MAX_AGE_DAYS = 1
+AUDIO_MAX_AGE_DAYS = 7
 
 
 async def cleanup_scheduler():
@@ -20,6 +21,7 @@ async def cleanup_scheduler():
         try:
             await _cleanup_notes()
             await _cleanup_stale_tasks()
+            await _cleanup_old_audio()
         except Exception as e:
             logger.error(f"Cleanup error: {e}")
         await asyncio.sleep(3600)  # Run every hour
@@ -61,8 +63,27 @@ async def _cleanup_stale_tasks():
         logger.info(f"Cleaned up {count} stale task dirs (> {TASKS_MAX_AGE_DAYS} day)")
 
 
+async def _cleanup_old_audio():
+    """Delete audio cache subdirs older than AUDIO_MAX_AGE_DAYS."""
+    audio_dir = DataConfig.AUDIO_DIR
+    if not audio_dir.exists():
+        return
+
+    cutoff = time.time() - (AUDIO_MAX_AGE_DAYS * 86400)
+    count = 0
+
+    for d in audio_dir.iterdir():
+        if d.is_dir() and d.stat().st_mtime < cutoff:
+            shutil.rmtree(d, ignore_errors=True)
+            count += 1
+
+    if count:
+        logger.info(f"Cleaned up {count} audio caches (> {AUDIO_MAX_AGE_DAYS} days)")
+
+
 def cleanup_sync():
     """Synchronous cleanup for testing."""
     import asyncio
     asyncio.get_event_loop().run_until_complete(_cleanup_notes())
     asyncio.get_event_loop().run_until_complete(_cleanup_stale_tasks())
+    asyncio.get_event_loop().run_until_complete(_cleanup_old_audio())

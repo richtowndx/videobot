@@ -9,7 +9,7 @@ import shutil
 import tempfile
 import time
 
-from utils.cleanup import _cleanup_notes, _cleanup_stale_tasks
+from utils.cleanup import _cleanup_notes, _cleanup_stale_tasks, _cleanup_old_audio
 
 
 def setup_temp_data():
@@ -17,8 +17,10 @@ def setup_temp_data():
     from config import DataConfig
     DataConfig.NOTES_DIR = Path(tmp) / "notes"
     DataConfig.TASKS_DIR = Path(tmp) / "tasks"
+    DataConfig.AUDIO_DIR = Path(tmp) / "audio"
     DataConfig.NOTES_DIR.mkdir(parents=True, exist_ok=True)
     DataConfig.TASKS_DIR.mkdir(parents=True, exist_ok=True)
+    DataConfig.AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     return tmp
 
 
@@ -84,8 +86,45 @@ def test_cleanup_nothing_to_clean():
         teardown(tmp)
 
 
+def test_cleanup_old_audio():
+    from utils.cleanup import AUDIO_MAX_AGE_DAYS
+    tmp = setup_temp_data()
+    try:
+        from config import DataConfig
+
+        # 旧音频子目录（>AUDIO_MAX_AGE_DAYS 天）
+        old_audio = DataConfig.AUDIO_DIR / "old_task"
+        old_audio.mkdir()
+        (old_audio / "audio.mp3").write_bytes(b"old")
+        (old_audio / "meta.json").write_text("{}", encoding="utf-8")
+        old_time = time.time() - ((AUDIO_MAX_AGE_DAYS + 1) * 86400)
+        os.utime(old_audio, (old_time, old_time))
+
+        # 新音频子目录
+        new_audio = DataConfig.AUDIO_DIR / "new_task"
+        new_audio.mkdir()
+        (new_audio / "audio.mp3").write_bytes(b"new")
+
+        asyncio.get_event_loop().run_until_complete(_cleanup_old_audio())
+
+        assert not old_audio.exists(), "旧音频应被清理"
+        assert new_audio.exists(), "新音频应保留"
+    finally:
+        teardown(tmp)
+
+
+def test_cleanup_old_audio_empty_dir():
+    tmp = setup_temp_data()
+    try:
+        asyncio.get_event_loop().run_until_complete(_cleanup_old_audio())  # 不应报错
+    finally:
+        teardown(tmp)
+
+
 if __name__ == "__main__":
     test_cleanup_old_notes()
     test_cleanup_stale_tasks()
     test_cleanup_nothing_to_clean()
+    test_cleanup_old_audio()
+    test_cleanup_old_audio_empty_dir()
     print("All cleanup tests passed!")
