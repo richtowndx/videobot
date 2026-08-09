@@ -286,7 +286,9 @@ class LLMSummarizer:
     def correct(self, text: str) -> str:
         """对 ASR 原始转写做纠错。无损：保留全部内容，仅修正错误。
         复用上下文窗口分块、overlap=0，逐块纠错后按顺序拼接。
-        截断/空响应由 _complete_stream 抛 EmptyLLMResponseError，经 _call_with_fallback 自动切模型。"""
+        单块失败时用该块原文兜底，不中断后续块（A1）；全块失败则返回原文。
+        截断/空响应由 _complete_stream 抛 EmptyLLMResponseError，经 _call_with_fallback 自动切模型，
+        切尽仍失败则在本方法内被 catch、用原文兜底。"""
         if not text:
             return text
 
@@ -295,10 +297,16 @@ class LLMSummarizer:
 
         parts = []
         for i, chunk in enumerate(chunks, start=1):
-            corrected = self._correct_single(chunk)
-            parts.append(corrected)
-            logger.info(f"Corrected chunk {i}/{len(chunks)} ({len(corrected)} chars)")
-
+            try:
+                corrected = self._correct_single(chunk)
+                parts.append(corrected)
+                logger.info(f"Corrected chunk {i}/{len(chunks)} ({len(corrected)} chars)")
+            except Exception as e:
+                logger.warning(
+                    f"Correct chunk {i}/{len(chunks)} failed, using raw text "
+                    f"({len(chunk)} chars): {e}"
+                )
+                parts.append(chunk)
         return "".join(parts)
 
     def _correct_single(self, chunk: str) -> str:

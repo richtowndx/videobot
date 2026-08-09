@@ -132,6 +132,31 @@ def test_correct_no_overlap_reconstructs_original():
     assert s.correct(text) == text
 
 
+def test_correct_chunk_failure_falls_back_to_raw():
+    """多块纠错时，中间块失败应使用该块原文，其余块用纠正结果，整体不抛错。"""
+    mc = MagicMock()
+    # correction_chunk_char_limit=5 => "0123456789" 切成 ["01234", "56789"]
+    # 第1块纠正成功返回 "AAAAA"，第2块抛 RuntimeError（模拟所有模型失败）
+    mc.chat.completions.create.side_effect = [_stream("AAAAA"), RuntimeError("All 2 model(s) failed for correct")]
+    s = _make_summarizer(mc)
+    s.correction_chunk_char_limit = 5
+    result = s.correct("0123456789")
+    assert result == "AAAAA" + "56789"   # 第1块纠正 + 第2块原文兜底
+
+
+def test_correct_all_chunks_fail_returns_raw():
+    """所有块都失败时，返回值等于原文，且不抛错。"""
+    mc = MagicMock()
+    mc.chat.completions.create.side_effect = [
+        RuntimeError("All 2 model(s) failed for correct"),
+        RuntimeError("All 2 model(s) failed for correct"),
+    ]
+    s = _make_summarizer(mc)
+    s.correction_chunk_char_limit = 5
+    result = s.correct("0123456789")
+    assert result == "0123456789"
+
+
 if __name__ == "__main__":
     test_correct_single_chunk_returns_content()
     test_correct_uses_correction_system_prompt()
