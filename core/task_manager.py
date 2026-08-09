@@ -39,11 +39,12 @@ class Task:
 
     @property
     def audio_file(self) -> Path:
+        audio_dir = DataConfig.AUDIO_DIR / self.task_id
         for ext in ("mp3", "m4a", "wav", "webm"):
-            p = self.task_dir / f"audio.{ext}"
+            p = audio_dir / f"audio.{ext}"
             if p.exists():
                 return p
-        return self.task_dir / "audio.mp3"
+        return audio_dir / "audio.mp3"
 
     @property
     def transcript_file(self) -> Path:
@@ -113,6 +114,23 @@ class TaskManager:
 
     def has_audio(self, task: Task) -> bool:
         return task.audio_file.exists()
+
+    def has_cached_audio(self, task_id: str) -> bool:
+        audio_dir = DataConfig.AUDIO_DIR / task_id
+        if not audio_dir.exists():
+            return False
+        return any((audio_dir / f"audio.{ext}").exists() for ext in ("mp3", "m4a", "wav", "webm"))
+
+    def save_audio_meta(self, task_id: str, title: str):
+        meta_path = DataConfig.AUDIO_DIR / task_id / "meta.json"
+        meta_path.parent.mkdir(parents=True, exist_ok=True)
+        meta_path.write_text(json.dumps({"title": title}, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def load_audio_meta(self, task_id: str) -> Optional[str]:
+        meta_path = DataConfig.AUDIO_DIR / task_id / "meta.json"
+        if not meta_path.exists():
+            return None
+        return json.loads(meta_path.read_text(encoding="utf-8")).get("title")
 
     def has_transcript(self, task: Task) -> bool:
         return task.transcript_file.exists()

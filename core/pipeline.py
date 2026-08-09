@@ -184,12 +184,15 @@ class Pipeline:
             return None
 
     def _ensure_audio(self, task: Task, downloader, url: str):
-        """任务 1：仍下载到 task 目录。任务 2 改为下载到 AUDIO_DIR。"""
         if self.task_manager.has_audio(task):
             return
         self.task_manager.update_state(task, TaskState.DOWNLOADING)
-        result = downloader.download_audio(url, str(task.task_dir))
+        from config import DataConfig
+        audio_dir = DataConfig.AUDIO_DIR / task.task_id
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        result = downloader.download_audio(url, str(audio_dir))
         task.title = result.title or task.title
+        self.task_manager.save_audio_meta(task.task_id, task.title or "Unknown Video")
         logger.info(f"Audio downloaded: {result.file_path}")
 
     def _transcribe(self, task: Task) -> str:

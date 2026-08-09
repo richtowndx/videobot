@@ -17,8 +17,10 @@ def setup_temp_data(monkeypatch):
     DataConfig.DATA_DIR = Path(tmp)
     DataConfig.TASKS_DIR = Path(tmp) / "tasks"
     DataConfig.NOTES_DIR = Path(tmp) / "notes"
+    DataConfig.AUDIO_DIR = Path(tmp) / "audio"
     DataConfig.TASKS_DIR.mkdir(parents=True, exist_ok=True)
     DataConfig.NOTES_DIR.mkdir(parents=True, exist_ok=True)
+    DataConfig.AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     return tmp
 
 
@@ -154,11 +156,13 @@ def test_cleanup_task_files():
 def test_has_audio():
     tmp = setup_temp_data(None)
     try:
+        from config import DataConfig
         mgr = TaskManager()
         task = mgr.create_task("abc123", "https://example.com", "youtube")
         assert not mgr.has_audio(task)
-        # Create audio file
-        (task.task_dir / "audio.mp3").write_bytes(b"fake audio")
+        audio_dir = DataConfig.AUDIO_DIR / "abc123"
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        (audio_dir / "audio.mp3").write_bytes(b"fake audio")
         assert mgr.has_audio(task)
     finally:
         teardown_temp_data(tmp)
@@ -175,7 +179,10 @@ def test_resume_logic():
         assert not mgr.can_resume_from_summarization(task)
 
         # Audio exists - can resume from transcription
-        (task.task_dir / "audio.mp3").write_bytes(b"fake")
+        from config import DataConfig
+        audio_dir = DataConfig.AUDIO_DIR / task.task_id
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        (audio_dir / "audio.mp3").write_bytes(b"fake")
         assert mgr.can_resume_from_transcription(task)
 
         # Transcript exists but NOT enough to resume summarization (need corrected)
@@ -266,6 +273,29 @@ def test_update_state_persists_correction_failed():
         teardown_temp_data(tmp)
 
 
+def test_audio_cache_and_meta():
+    tmp = setup_temp_data(None)
+    try:
+        from config import DataConfig
+        mgr = TaskManager()
+        task = mgr.create_task("abc123", "https://example.com", "youtube")
+        assert not mgr.has_cached_audio("abc123")
+
+        # 模拟下载器写入音频到 AUDIO_DIR/{task_id}/
+        audio_dir = DataConfig.AUDIO_DIR / "abc123"
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        (audio_dir / "audio.mp3").write_bytes(b"fake")
+        assert mgr.has_cached_audio("abc123")
+        assert mgr.has_audio(task), "has_audio 应指向 AUDIO_DIR"
+
+        # meta 存取
+        mgr.save_audio_meta("abc123", "My Video Title")
+        assert mgr.load_audio_meta("abc123") == "My Video Title"
+        assert mgr.load_audio_meta("nope") is None
+    finally:
+        teardown_temp_data(tmp)
+
+
 if __name__ == "__main__":
     test_create_task()
     test_get_task()
@@ -282,4 +312,5 @@ if __name__ == "__main__":
     test_resume_logic_now_requires_corrected()
     test_load_backward_compat_without_correction_failed()
     test_update_state_persists_correction_failed()
+    test_audio_cache_and_meta()
     print("All task_manager tests passed!")

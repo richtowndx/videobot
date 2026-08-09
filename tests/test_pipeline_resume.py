@@ -36,8 +36,10 @@ def _setup(tmp_dir):
     DataConfig.DATA_DIR = Path(tmp_dir)
     DataConfig.TASKS_DIR = Path(tmp_dir) / "tasks"
     DataConfig.NOTES_DIR = Path(tmp_dir) / "notes"
+    DataConfig.AUDIO_DIR = Path(tmp_dir) / "audio"
     DataConfig.TASKS_DIR.mkdir(parents=True, exist_ok=True)
     DataConfig.NOTES_DIR.mkdir(parents=True, exist_ok=True)
+    DataConfig.AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _mock_downloader(title="Test Video"):
@@ -299,8 +301,10 @@ def test_intermediate_file_states():
         print("  State 0: empty task directory ✓")
 
         # State 1: After download failure (simulate by creating audio, no transcript)
-        task.task_dir.mkdir(parents=True, exist_ok=True)
-        (task.task_dir / "audio.mp3").write_bytes(b"fake")
+        from config import DataConfig
+        audio_dir = DataConfig.AUDIO_DIR / task_id
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        (audio_dir / "audio.mp3").write_bytes(b"fake")
         task_manager.update_state(task, TaskState.FAILED, error="transcription crash")
 
         assert task_manager.has_audio(task)
@@ -329,10 +333,11 @@ def test_intermediate_file_states():
         task_manager.update_state(task, TaskState.COMPLETED)
         task_manager.cleanup_task_files(task)
 
-        assert not task_manager.has_audio(task)  # Cleaned up
-        assert not task_manager.has_transcript(task)  # Cleaned up
-        assert task_manager.get_cached_result(task_id)  # Note persists
-        print("  State 3: completed -> audio/transcript cleaned, note cached ✓")
+        assert task_manager.has_audio(task), "完成后音频应在 AUDIO_DIR 保留"
+        assert not task_manager.has_transcript(task), "transcript 被清"
+        assert not (task.task_dir / "audio.mp3").exists(), "task_dir 内不再有音频"
+        assert task_manager.get_cached_result(task_id)  # note persists
+        print("  State 3: completed -> audio retained in AUDIO_DIR, task_dir cleaned, note cached ✓")
 
         print("test_intermediate_file_states PASSED\n")
     finally:

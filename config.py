@@ -173,10 +173,12 @@ class DataConfig:
     DATA_DIR = Path(_cfg.get("data", {}).get("dir", "./data"))
     TASKS_DIR = DATA_DIR / "tasks"
     NOTES_DIR = DATA_DIR / "notes"
+    AUDIO_DIR = DATA_DIR / "audio"
     MODELS_DIR = BASE_DIR / "models"
 
     TASKS_DIR.mkdir(parents=True, exist_ok=True)
     NOTES_DIR.mkdir(parents=True, exist_ok=True)
+    AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 
