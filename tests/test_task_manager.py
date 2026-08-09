@@ -296,6 +296,33 @@ def test_audio_cache_and_meta():
         teardown_temp_data(tmp)
 
 
+def test_get_resume_action_quadrants():
+    tmp = setup_temp_data(None)
+    try:
+        from config import DataConfig
+        mgr = TaskManager()
+        task = mgr.create_task("abc", "https://example.com", "youtube")
+
+        # 无音频 + 无笔记 -> full
+        assert mgr.get_resume_action(task) == "full"
+
+        # 有笔记 + 无音频 -> return_cached
+        mgr.save_note(task, "# Note")
+        assert mgr.get_resume_action(task) == "return_cached"
+
+        # 有音频(+有笔记) -> reprocess（音频优先）
+        audio_dir = DataConfig.AUDIO_DIR / task.task_id
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        (audio_dir / "audio.mp3").write_bytes(b"fake")
+        assert mgr.get_resume_action(task) == "reprocess"
+
+        # 有音频 + 无笔记 -> reprocess
+        (DataConfig.NOTES_DIR / f"{task.task_id}.md").unlink()
+        assert mgr.get_resume_action(task) == "reprocess"
+    finally:
+        teardown_temp_data(tmp)
+
+
 if __name__ == "__main__":
     test_create_task()
     test_get_task()
@@ -313,4 +340,5 @@ if __name__ == "__main__":
     test_load_backward_compat_without_correction_failed()
     test_update_state_persists_correction_failed()
     test_audio_cache_and_meta()
+    test_get_resume_action_quadrants()
     print("All task_manager tests passed!")

@@ -121,17 +121,12 @@ class Pipeline:
             self.set_processing(False)
 
     def _do_process(self, url: str, task: Task, mem_start: float) -> Optional[PipelineResult]:
-        # 已完成：返回缓存（任务 3 将由入口决策接管）
-        cached = self.task_manager.get_cached_result(task.task_id)
-        if cached:
-            logger.info(f"Returning cached result for {task.task_id}")
-            return PipelineResult(task_id=task.task_id, title=task.title or "video", content=cached)
-
         self._reset_if_failed(task)
+        audio_cached = self.task_manager.has_cached_audio(task.task_id)
         downloader = get_downloader(task.platform)
 
-        self._ensure_title(task, downloader, url)
-        text = self._acquire_text(task, downloader, url)
+        self._ensure_title(task, downloader, url, audio_cached)
+        text = self._acquire_text(task, downloader, url, audio_cached)
         if not text:
             logger.error("No text content available for summarization")
             self.task_manager.update_state(task, TaskState.FAILED, error="No text content")
@@ -149,8 +144,12 @@ class Pipeline:
             task.error = None
             self.task_manager.update_state(task, TaskState.PENDING)
 
-    def _ensure_title(self, task: Task, downloader, url: str):
-        """任务 1：始终联网取标题（与原行为一致）。任务 3 改为按 audio_cached 跳过。"""
+    def _ensure_title(self, task: Task, downloader, url: str, audio_cached: bool):
+        if task.title:
+            return
+        if audio_cached:
+            task.title = self.task_manager.load_audio_meta(task.task_id) or "Unknown Video"
+            return
         try:
             info = downloader.extract_info(url)
             task.title = info.get("title", "Unknown Video")
@@ -158,9 +157,9 @@ class Pipeline:
             logger.warning(f"Failed to extract info: {e}")
             task.title = "Unknown Video"
 
-    def _acquire_text(self, task: Task, downloader, url: str) -> str:
+    def _acquire_text(self, task: Task, downloader, url: str, audio_cached: bool) -> str:
         """取总结用文本：字幕优先，否则音频转写 + 纠错。"""
-        subtitle = self._maybe_get_subtitle(task, downloader, url)
+        subtitle = self._maybe_get_subtitle(task, downloader, url, audio_cached)
         if subtitle:
             return subtitle
         self._ensure_audio(task, downloader, url)
@@ -169,7 +168,9 @@ class Pipeline:
             return ""
         return self._correct(task, url, transcript) or transcript
 
-    def _maybe_get_subtitle(self, task: Task, downloader, url: str) -> Optional[str]:
+    def _maybe_get_subtitle(self, task: Task, downloader, url: str, audio_cached: bool) -> Optional[str]:
+        if audio_cached:
+            return None
         if self.task_manager.has_subtitle(task):
             return self.task_manager.load_subtitle(task)
         self.task_manager.update_state(task, TaskState.DOWNLOADING)

@@ -548,6 +548,94 @@ def test_correction_sets_correcting_state():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ── Test 10: Reprocess skips all networking ─────────────────────────────────
+
+def test_reprocess_skips_all_networking():
+    """音频缓存命中时重跑：extract_info/extract_subtitles/download_audio 均不被调用。"""
+    tmp = tempfile.mkdtemp(prefix="test_reprocess_")
+    _setup(tmp)
+    try:
+        url = BILIBILI_URL
+        task_manager = TaskManager()
+        pipeline = Pipeline()
+        task, _ = task_manager.get_or_create(url, "bilibili")
+
+        # Phase 1：首次跑通，音频落到 AUDIO_DIR
+        pipeline._transcriber = mock.MagicMock()
+        pipeline._transcriber.transcript.return_value = "RAW"
+        pipeline._summarizer = mock.MagicMock()
+        pipeline._summarizer.correct.return_value = "CORRECTED"
+        pipeline._summarizer._last_model_name = "test-model"
+        pipeline._summarizer.summarize.return_value = "# First"
+        with mock.patch("core.pipeline.get_downloader", return_value=_mock_downloader(title="My Title")):
+            pipeline.process(url, task)
+        assert task_manager.has_cached_audio(task.task_id)
+
+        # Phase 2：重跑 —— 全新 downloader mock，断言零联网
+        pipeline._transcriber.transcript.return_value = "RAW2"
+        pipeline._summarizer.summarize.return_value = "# Second"
+        # Reset call counts so assertions only cover Phase 2
+        pipeline._transcriber.transcript.reset_mock()
+        pipeline._summarizer.summarize.reset_mock()
+        strict_dl = mock.MagicMock()
+        with mock.patch("core.pipeline.get_downloader", return_value=strict_dl):
+            task = task_manager.get_task(task.task_id)
+            result = pipeline.process(url, task)
+
+        assert result is not None
+        assert result.content == "# Second"
+        strict_dl.extract_info.assert_not_called()
+        strict_dl.extract_subtitles.assert_not_called()
+        strict_dl.download_audio.assert_not_called()
+        pipeline._transcriber.transcript.assert_called()
+        pipeline._summarizer.summarize.assert_called_once()
+        print("test_reprocess_skips_all_networking PASSED\n")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ── Test 11: Reprocess recovers title from meta.json ───────────────────────
+
+def test_reprocess_recovers_title_from_meta():
+    """task 目录被清理（标题丢失）后重跑，从 meta.json 恢复标题且不联网。"""
+    tmp = tempfile.mkdtemp(prefix="test_title_meta_")
+    _setup(tmp)
+    try:
+        url = BILIBILI_URL
+        task_manager = TaskManager()
+        pipeline = Pipeline()
+        task, _ = task_manager.get_or_create(url, "bilibili")
+
+        pipeline._transcriber = mock.MagicMock()
+        pipeline._transcriber.transcript.return_value = "RAW"
+        pipeline._summarizer = mock.MagicMock()
+        pipeline._summarizer.correct.return_value = "CORRECTED"
+        pipeline._summarizer._last_model_name = "test-model"
+        pipeline._summarizer.summarize.return_value = "# Summary"
+        with mock.patch("core.pipeline.get_downloader", return_value=_mock_downloader(title="The Real Title")):
+            pipeline.process(url, task)
+
+        # 模拟 task 目录被 1 天定时清理
+        import shutil as _sh
+        _sh.rmtree(task.task_dir, ignore_errors=True)
+        assert task_manager.has_cached_audio(task.task_id)
+        assert task_manager.load_audio_meta(task.task_id) == "The Real Title"
+
+        # 重跑：strict downloader 不应联网；标题从 meta 恢复
+        pipeline._summarizer.summarize.return_value = "# Summary 2"
+        strict_dl = mock.MagicMock()
+        with mock.patch("core.pipeline.get_downloader", return_value=strict_dl):
+            new_task, _ = task_manager.get_or_create(url, "bilibili")
+            result = pipeline.process(url, new_task)
+
+        assert result is not None
+        assert result.title == "The Real Title", "标题应从 meta.json 恢复"
+        strict_dl.extract_info.assert_not_called()
+        print("test_reprocess_recovers_title_from_meta PASSED\n")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ── Main runner ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -560,4 +648,6 @@ if __name__ == "__main__":
     test_subtitle_path_skips_correction()
     test_resume_recreates_missing_mp3md()
     test_correction_sets_correcting_state()
+    test_reprocess_skips_all_networking()
+    test_reprocess_recovers_title_from_meta()
     print("All pipeline resume tests passed!")

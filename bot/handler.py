@@ -106,16 +106,17 @@ async def _process_single_url(
     if not platform:
         return False, f"Unsupported platform: {url}"
 
-    task, is_cached = task_manager.get_or_create(url, platform)
+    task, _existed = task_manager.get_or_create(url, platform)
+    action = task_manager.get_resume_action(task)
 
-    if is_cached and task.state == TaskState.COMPLETED:
+    if action == "return_cached":
         cached = task_manager.get_cached_result(task.task_id)
         if cached:
-            # Load model_name from status.json for complete header
             full_task = task_manager.get_task(task.task_id)
             model_name = full_task.model_name if full_task else None
             await _send_note(message, task.title or "video", task.platform, url, cached, model_name, task_id=task.task_id)
             return True, ""
+        # 笔记恰好消失 -> 回落到 full 流程
 
     prefix = f"[{index}/{total}] " if total > 1 else ""
     last_error = ""

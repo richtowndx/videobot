@@ -115,6 +115,18 @@ class TaskManager:
     def has_audio(self, task: Task) -> bool:
         return task.audio_file.exists()
 
+    def get_resume_action(self, task: Task) -> str:
+        """决定本次请求如何处理：
+        'reprocess'     : 音频缓存命中 -> 从音频重跑，跳过一切联网
+        'return_cached' : 有笔记无音频 -> 直接返回缓存笔记（不联网）
+        'full'          : 无音频 -> 正常全流程（联网下载）
+        """
+        if self.has_cached_audio(task.task_id):
+            return "reprocess"
+        if task.note_file.exists():
+            return "return_cached"
+        return "full"
+
     def has_cached_audio(self, task_id: str) -> bool:
         audio_dir = DataConfig.AUDIO_DIR / task_id
         if not audio_dir.exists():
